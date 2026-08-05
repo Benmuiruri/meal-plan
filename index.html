@@ -576,21 +576,28 @@ const db = {
   },
 
   async saveWeek(week) {
-    const { data, error } = await this.client.from('weeks').update({
+    const payload = {
       budget: week.budget,
       picks: week.picks,
       days: week.days,
       groceries: week.groceries,
       use_remainder: week.use_remainder,
-    }).eq('id', week.id).select('id');
+    };
+    const { data, error } = await this.client.from('weeks')
+      .update(payload).eq('id', week.id).select('id');
     if (error) throw error;
-    // an update matching zero rows reports no error — that is a failed save,
-    // not a successful one
-    if (!data || data.length === 0) {
-      const gone = new Error('week row not found');
-      gone.code = 'WEEK_GONE';
-      throw gone;
-    }
+    if (data && data.length > 0) return;
+    // an update matching zero rows reports no error, but the row is gone
+    // (deleted elsewhere, reset project) — recreate it with the same id and
+    // content rather than letting every retry fail forever
+    const { error: restoreError } = await this.client.from('weeks').upsert({
+      id: week.id,
+      user_id: week.user_id,
+      week_start: week.week_start,
+      status: week.status,
+      ...payload,
+    });
+    if (restoreError) throw restoreError;
   },
 
   async addMeal(userId, { name, kind, image_url, tint }) {
@@ -648,14 +655,28 @@ async function flushSave() {
   try {
     await db.saveWeek(state.week);
     if (!saveTimer) setSaveStatus('saved');
-    if ($('.banner')) render(); // a recovery clears the "couldn't save" banner
   } catch {
-    // no silent failure: show the banner and keep the edits in memory —
+    // no silent failure: keep the edits in memory and surface the banner —
     // Retry (or connectivity returning) sends this same week row again
     setSaveStatus('error');
-    render();
   } finally {
     saveInFlight = false;
+    updateSaveBanner();
+    // if edits queued behind this request while the tab went hidden, don't
+    // trust a throttled background timer — send them now, while the page is
+    // still alive to complete the request
+    if (saveTimer && document.visibilityState === 'hidden') flushSave();
+  }
+}
+
+// Surgical, state-driven banner management: a full render() here would
+// rebuild the inputs and yank focus mid-typing on the flaky-connection path.
+function updateSaveBanner() {
+  const existing = $('#save-banner');
+  if (state.phase === 'ready' && state.saveStatus === 'error') {
+    if (!existing) $('.header')?.insertAdjacentHTML('afterend', viewSaveErrorBanner());
+  } else {
+    existing?.remove();
   }
 }
 
@@ -694,7 +715,7 @@ function viewHeader() {
 function viewSaveErrorBanner() {
   if (state.saveStatus !== 'error') return '';
   return `
-    <div class="banner" role="status">
+    <div class="banner" id="save-banner" role="status">
       <span>Couldn't save — check your connection. Your changes are still here; retry sends them again.</span>
       <button data-action="retry-save" type="button">Retry</button>
     </div>`;
@@ -1318,9 +1339,19 @@ async function main() {
       render();
       return;
     }
-    await boot(createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_ANON_KEY, {
-      auth: { persistSession: true, detectSessionInUrl: true },
-    }));
+    try {
+      await boot(createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_ANON_KEY, {
+        auth: { persistSession: true, detectSessionInUrl: true },
+      }));
+    } catch (err) {
+      // without this, a rejection out of boot() parks the app on the loading
+      // splash with no error surface and no retry
+      state.phase = 'error';
+      state.errorMsg = err?.message
+        ? `Could not start: ${err.message}`
+        : 'Could not start — check your connection and try again.';
+      render();
+    }
   } finally {
     bootInFlight = false;
   }
