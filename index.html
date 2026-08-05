@@ -623,7 +623,7 @@ const db = {
    6. STATE
    ================================================================ */
 const state = {
-  phase: 'loading',   // loading | config | signin | check-email | ready | error
+  phase: 'loading',   // loading | config | signin | ready | error
   errorMsg: '',
   session: null,
   meals: [],
@@ -778,18 +778,13 @@ function viewConfig() {
 function viewSignin() {
   return viewGate(`
     <h2>Sign in</h2>
-    <p>You'll get an email with a link that signs this device in. No password.</p>
+    <p>One household account — the same email and password works for both of you, on any device. Each device stays signed in.</p>
     <form id="form-signin">
-      <input class="field" type="email" name="email" placeholder="you@example.com" required autocomplete="email">
-      <button class="btn-primary" type="submit">Email me a link</button>
+      <input class="field" type="email" name="email" placeholder="Email" required autocomplete="username">
+      <input class="field" type="password" name="password" placeholder="Password" required autocomplete="current-password">
+      <button class="btn-primary" type="submit">Sign in</button>
       ${state.errorMsg ? `<p class="error">${esc(state.errorMsg)}</p>` : ''}
     </form>`);
-}
-
-function viewCheckEmail() {
-  return viewGate(`
-    <h2>Check your email</h2>
-    <p>The link signs you in on this device. You can close this tab — the link brings you back.</p>`);
 }
 
 function viewError() {
@@ -1046,7 +1041,6 @@ function render() {
     case 'loading':     app.innerHTML = viewGate('<p>Loading…</p>'); return;
     case 'config':      app.innerHTML = viewConfig(); return;
     case 'signin':      app.innerHTML = viewSignin(); return;
-    case 'check-email': app.innerHTML = viewCheckEmail(); return;
     case 'error':       app.innerHTML = viewError(); return;
   }
   const screens = { pick: viewPick, week: viewWeek, budget: viewBudget, summary: viewSummary };
@@ -1208,16 +1202,18 @@ document.addEventListener('submit', async (e) => {
 
   if (form.id === 'form-signin') {
     const email = form.email.value.trim();
+    const password = form.password.value;
     form.querySelector('button').disabled = true;
-    const { error } = await db.client.auth.signInWithOtp({
-      email,
-      options: { emailRedirectTo: location.origin + location.pathname },
-    });
+    const { error } = await db.client.auth.signInWithPassword({ email, password });
     if (error) {
-      state.errorMsg = error.message;
+      state.errorMsg = error.message === 'Invalid login credentials'
+        ? 'Wrong email or password.'
+        : error.message;
       render();
     } else {
-      state.phase = 'check-email';
+      // SIGNED_IN fires through onAuthStateChange and initData takes over
+      state.errorMsg = '';
+      state.phase = 'loading';
       render();
     }
   }

@@ -25,7 +25,7 @@ The app keeps that exact rhythm. It removes the retyping, the jumping between no
 | Groceries | Staples list you tick, plus free manual rows. No ingredient auto-suggestion. |
 | History | Read-only look-back at past weeks |
 | Data | **Supabase from day one.** Same weeks on every device. |
-| Sign-in | Email magic link, once per device |
+| Sign-in | One shared household account, email + password, once per device |
 | Hosting | Netlify, static |
 | Budget | Never blocks. Goes negative, colour warns. |
 | Theme | Bright, menu-board |
@@ -107,7 +107,7 @@ Phase 2 adds photo upload through a public Supabase Storage bucket called `meal-
 Bottom tab bar, four tabs, hash routing so your phone's back button behaves.
 
 ### Sign in
-One field, one button: *"Email me a link."* Then *"Check your email — the link signs you in on this device."* On first-ever sign-in the app seeds your library and staples, so you land on a full Pick screen rather than an empty one.
+Email and password, one button. The single household account is pre-created in Supabase — there is no sign-up flow in the app. On first-ever sign-in the app seeds your library and staples, so you land on a full Pick screen rather than an empty one. The session persists per device.
 
 ### Pick
 Mains / Breakfasts toggle. Two-column card grid — image if you've added one, coloured name tile if not. Tap to select, tap again to drop. Sticky header counts `4 / 7` for the active tab. Last tile is **Add a meal**: name, kind, image, done. Long-press a card to edit or remove it.
@@ -184,13 +184,13 @@ Library editing and archiving, delete a saved week, keyboard focus states, web m
 
 ## 10. Setup, in order
 
-The sequence matters — magic links need to know your live URL, so the app gets deployed before auth is finished.
+The sequence matters — auth emails (password resets) need to know your live URL, so the app gets deployed before auth is finished.
 
 1. **Create the Supabase project** at supabase.com. Free tier, no card. Note the region closest to you.
 2. **Run `schema.sql`** in the SQL Editor. One paste, one run.
 3. **Copy two values** from Project Settings → API: the project URL and the `anon` public key. Paste them into the `CONFIG` block at the top of `index.html`. Both are safe to have in a public file — row-level security is what protects your data, not key secrecy.
 4. **Deploy to Netlify.** Either drag the file onto `netlify.com/drop`, or put it in a GitHub repo and connect Netlify to it. The repo route means editing the file on github.com redeploys automatically, including from your phone.
-5. **Point auth at the live URL.** Supabase → Authentication → URL Configuration: set Site URL to your Netlify address. Without this, magic links land on localhost and fail.
+5. **Point auth at the live URL.** Supabase → Authentication → URL Configuration: set Site URL to your Netlify address. Sign-in itself doesn't need it, but password-reset links land on localhost without it. While there, consider turning **off** "Allow new users to sign up" — the household account already exists and nothing else should self-register.
 6. **Sign in and seed.** First sign-in writes your library and staples.
 7. **Add to Home Screen** from your browser menu. After Phase 3 it opens without browser chrome.
 
@@ -201,7 +201,7 @@ The sequence matters — magic links need to know your live URL, so the app gets
 - **No network, no app.** Online-only by decision — a failed save shows *Not saved* and retries; there is no offline copy. Section 4 has the history.
 - **Free tier pauses after a week idle.** Weekly use avoids this. A long break means unpausing from the dashboard.
 - **No ingredient auto-suggestion.** Choosing seven mains tells the grocery screen nothing — you still tick and type. Your call, and it keeps the app honest, but it's the one place work isn't removed.
-- **Magic links need a working inbox.** Supabase's free email sending is rate-limited and occasionally slow. If it becomes annoying, the fix is pointing Supabase at a free Resend account, about 10 minutes.
+- **Password resets go through email.** Day-to-day sign-in never touches an inbox, but a forgotten password means a reset link sent through Supabase's rate-limited free email — or just resetting the password from the Supabase dashboard directly.
 
 ---
 
@@ -211,3 +211,4 @@ The sequence matters — magic links need to know your live URL, so the app gets
 2. Breakfasts do **not** repeat within a week — seven distinct picks, tap-to-select stays as designed.
 3. Currency — **`KSh 1,200`** on totals and the budget figure; plain `1,200` on individual line items.
 4. Offline support — **removed entirely**, superseding the offline-ticks decision made earlier the same day. The app is used online only; section 4's market-connectivity concern was judged overstated in practice. Failed saves surface a *Not saved* banner with a Retry instead.
+5. Sign-in — **one shared household account with a password**, replacing magic links. Two people, one plan: separate accounts would mean separate RLS-scoped datasets. The account is pre-created in Supabase (no sign-up flow in the app); credentials live with the household, never in this repo.
