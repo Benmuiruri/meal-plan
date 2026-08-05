@@ -127,18 +127,24 @@ test('signIn success stores the session, clears the error and the kept email', a
   assert.equal(state.signinEmail, '', 'a failed address must not pre-fill a future sign-in');
 });
 
-test('the real sign-in template emits the kept email into the value attribute', async () => {
+test('the real sign-in template emits and escapes the kept email and error message', async () => {
   const tmplStart = html.indexOf('function viewSignin');
   const tmplEnd = html.indexOf('function viewError');
   assert.ok(tmplStart > 0 && tmplEnd > tmplStart, 'sign-in template markers found in index.html');
+  // use the real esc, not an identity stub — the escaping is the property
+  // that matters for these user/API-controlled strings
+  const escStart = html.indexOf('const esc =');
+  const escEnd = html.indexOf('[c]));', escStart);
+  assert.ok(escStart > 0 && escEnd > escStart, 'esc markers found in index.html');
   const mod = await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(
-    `const state = { signinEmail: 'kept@example.com', errorMsg: '' };
-     const esc = (s) => String(s);
+    `const state = { signinEmail: 'kept"@example.com', errorMsg: '<b>boom</b>' };
+     ${html.slice(escStart, escEnd + '[c]));'.length)}
      const viewGate = (inner) => inner;
      ${html.slice(tmplStart, tmplEnd)}
      export { viewSignin };`));
   const out = mod.viewSignin();
-  assert.match(out, /value="kept@example\.com"/);
+  assert.match(out, /value="kept&quot;@example\.com"/, 'email is emitted AND attribute-escaped');
+  assert.match(out, /&lt;b&gt;boom&lt;\/b&gt;/, 'error message is html-escaped');
   assert.match(out, /type="password"/);
 });
 
@@ -146,9 +152,10 @@ test('the sign-in submit glue kicks initData directly (a stalled SIGNED_IN canno
   const hStart = html.indexOf("if (form.id === 'form-signin')");
   const hEnd = html.indexOf("if (form.id === 'form-addmeal')");
   assert.ok(hStart > 0 && hEnd > hStart, 'sign-in handler markers found in index.html');
-  const handler = html.slice(hStart, hEnd);
-  assert.match(handler, /await signIn\(/);
-  assert.match(handler, /initData\(\)/);
+  // strip line comments so a commented-out call cannot satisfy the pin
+  const live = html.slice(hStart, hEnd).replace(/\/\/[^\n]*/g, '');
+  assert.match(live, /await signIn\(/);
+  assert.match(live, /initData\(\)/);
 });
 
 test('saveWeek restores a vanished row on the natural key and adopts the canonical id', async () => {
