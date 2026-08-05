@@ -619,17 +619,21 @@ const db = {
   },
 };
 
-// PGRST303 — "JWT issued at future": a freshly minted access token can look
-// post-dated to a Supabase node whose clock runs a beat behind the issuer's.
-// The rejection happens during auth, before the query executes, so nothing
-// ran and a blind re-run is safe. The skew is about a second; one delayed
-// retry absorbs it instead of surfacing a fatal-looking error.
+// "JWT issued at future": a freshly minted access token can look post-dated
+// to a Supabase node whose clock runs a beat behind the issuer's. Its code,
+// PGRST303, covers every JWT claims failure — expired tokens included — so
+// the message is the discriminator, not decoration. The rejected request
+// never executed, but earlier requests inside a multi-step method did, so
+// the retry re-running the whole method is safe only while every db method
+// stays idempotent (reads, same-payload updates, natural-key upserts) —
+// new methods must keep that property or opt out of the wrap below.
 const SKEW_RETRY_MS = 2000;
 async function withSkewRetry(run) {
   try {
     return await run();
   } catch (err) {
-    if (err?.code !== 'PGRST303') throw err;
+    const skewRejected = err?.code === 'PGRST303' && /issued at future/i.test(err?.message ?? '');
+    if (!skewRejected) throw err;
     await new Promise((resolve) => setTimeout(resolve, SKEW_RETRY_MS));
     return run();
   }

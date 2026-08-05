@@ -379,10 +379,19 @@ test('a second PGRST303 failure surfaces instead of retrying forever', async () 
 });
 
 test('non-skew errors propagate immediately without a retry', async () => {
-  db.client = fakeRetryClient([{ code: 'PGRST301', message: 'JWT expired' }]);
+  // real taxonomy: an expired JWT is ALSO PGRST303 — only the message
+  // separates it from skew, so it must take the no-retry path
+  db.client = fakeRetryClient([{ code: 'PGRST303', message: 'JWT expired' }]);
   const delays = await withInstantTimers(async () => {
-    await assert.rejects(db.seedStaples('u1'), (err) => err.code === 'PGRST301');
+    await assert.rejects(db.seedStaples('u1'), (err) => err.message === 'JWT expired');
   });
   assert.equal(db.client.counter.attempts, 1);
-  assert.equal(delays.length, 0, 'no delay may be scheduled for a non-skew error');
+  assert.equal(delays.length, 0, 'no delay may be scheduled for an expired token');
+
+  db.client = fakeRetryClient([{ code: '42501', message: 'permission denied for table staples' }]);
+  const delays2 = await withInstantTimers(async () => {
+    await assert.rejects(db.seedStaples('u1'), (err) => err.code === '42501');
+  });
+  assert.equal(db.client.counter.attempts, 1);
+  assert.equal(delays2.length, 0, 'no delay may be scheduled for a non-JWT error');
 });
