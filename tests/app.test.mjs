@@ -10,7 +10,16 @@ import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
-globalThis.document = { querySelector: () => null, visibilityState: 'visible' };
+// Minimal observable DOM: just enough for updateSaveBanner's insert/remove to
+// be visible to assertions, so deleting the banner wiring fails the suite.
+const dom = { banner: null };
+const fakeHeader = {
+  insertAdjacentHTML: (_pos, html) => { dom.banner = { html, remove: () => { dom.banner = null; } }; },
+};
+globalThis.document = {
+  visibilityState: 'visible',
+  querySelector: (sel) => (sel === '#save-banner' ? dom.banner : sel === '.header' ? fakeHeader : null),
+};
 
 const html = await readFile(new URL('../index.html', import.meta.url), 'utf8');
 const start = html.indexOf('const DAY_KEYS');
@@ -19,7 +28,7 @@ assert.ok(start > 0 && viewsBanner > start, 'section markers found in index.html
 
 const src = html.slice(start, viewsBanner) + `
 function render() {}
-function viewSaveErrorBanner() { return ''; }
+function viewSaveErrorBanner() { return '<banner>' + (state.saveErrorPermanent ? 'permanent' : 'transient') + '</banner>'; }
 export { state, db, scheduleSave, flushSave };`;
 
 const { state, db, scheduleSave, flushSave } =
@@ -59,8 +68,10 @@ function fakeWeeksClient({ matchedRows = [{ id: 'w1' }], failWith = null, failUp
 }
 
 beforeEach(() => {
+  dom.banner = null;
   state.phase = 'ready';
   state.saveStatus = 'saved';
+  state.saveErrorPermanent = false;
   state.week = {
     id: 'w1', user_id: 'u1', week_start: '2026-08-03', budget: 2500, status: 'draft',
     picks: { mains: [], breakfasts: [] }, days: {},
@@ -121,6 +132,33 @@ test('flushSave failure marks error and keeps edits; retry with the same row rec
   assert.equal(state.saveStatus, 'saved');
 });
 
+test('banner follows every status transition: appears on failure, clears on the next edit', async () => {
+  db.client = fakeWeeksClient({ failWith: { message: 'network down' } });
+  await flushSave();
+  assert.ok(dom.banner, 'banner inserted on error');
+  assert.match(dom.banner.html, /transient/);  // connection failures offer Retry
+  scheduleSave();                              // user resumes typing
+  assert.equal(dom.banner, null, 'a resumed edit clears the stale banner immediately');
+});
+
+test('banner clears when a retry succeeds', async () => {
+  db.client = fakeWeeksClient({ failWith: { message: 'network down' } });
+  await flushSave();
+  assert.ok(dom.banner);
+  db.client = fakeWeeksClient();
+  await flushSave();
+  assert.equal(dom.banner, null);
+});
+
+test('a permanent failure shows the permanent banner, not a connection retry', async () => {
+  db.client = fakeWeeksClient({ matchedRows: [] });
+  delete state.week.user_id;                   // restore guard refuses -> permanent
+  await flushSave();
+  assert.equal(state.saveStatus, 'error');
+  assert.equal(state.saveErrorPermanent, true);
+  assert.match(dom.banner.html, /permanent/);
+});
+
 test('saves are serialized and a stale completion cannot stamp Saved over pending work', async () => {
   db.client = fakeWeeksClient({ delayMs: 60 });
   state.saveStatus = 'saving';
@@ -138,16 +176,19 @@ test('saves are serialized and a stale completion cannot stamp Saved over pendin
 });
 
 test('a flush deferred behind an in-flight request fires immediately once the tab is hidden', async () => {
-  db.client = fakeWeeksClient({ delayMs: 60 });
-  state.saveStatus = 'saving';
-  const first = flushSave();                   // request A, in flight
-  await sleep(10);
-  await flushSave();                           // deferred onto the 200ms timer
-  document.visibilityState = 'hidden';
-  await first;                                 // A completes while hidden
-  await sleep(20);                             // far below the 200ms timer —
-  assert.equal(db.client.ops('update').length, 2); // — the re-flush must not wait for it
-  document.visibilityState = 'visible';
-  await sleep(150);                            // let the trailing request settle
-  assert.equal(state.saveStatus, 'saved');
+  try {
+    db.client = fakeWeeksClient({ delayMs: 60 });
+    state.saveStatus = 'saving';
+    const first = flushSave();                 // request A, in flight
+    await sleep(10);
+    await flushSave();                         // deferred onto the 200ms timer
+    document.visibilityState = 'hidden';
+    await first;                               // A completes while hidden
+    await sleep(20);                           // far below the 200ms timer —
+    assert.equal(db.client.ops('update').length, 2); // — the re-flush must not wait for it
+    await sleep(150);                          // let the trailing request settle
+    assert.equal(state.saveStatus, 'saved');
+  } finally {
+    document.visibilityState = 'visible';      // never leak a hidden document to later tests
+  }
 });

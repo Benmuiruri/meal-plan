@@ -592,7 +592,13 @@ const db = {
     // every retry fail forever. Conflict on the natural key, not the id:
     // another device may have already recreated this week under a fresh id,
     // and inserting a second (user_id, week_start) row would 23505 forever.
-    if (!week.user_id || !week.week_start) throw new Error('week row incomplete — cannot restore');
+    if (!week.user_id || !week.week_start || !week.status) {
+      // a local, permanent condition — retrying can never fix it, so it must
+      // not be dressed up as a connection problem
+      const incomplete = new Error('week row incomplete — cannot restore');
+      incomplete.permanent = true;
+      throw incomplete;
+    }
     const { data: restored, error: restoreError } = await this.client.from('weeks')
       .upsert({
         user_id: week.user_id,
@@ -627,7 +633,8 @@ const state = {
   pickTab: 'mains',   // mains | breakfasts
   lifted: null,       // { slot: 'dinner'|'breakfast', day: 'mon' }
   addOpen: false,
-  saveStatus: 'saved',  // saved | saving | error
+  saveStatus: 'saved',       // saved | saving | error
+  saveErrorPermanent: false, // error subtype: permanent failures get Reload, not Retry
 };
 
 const mealById = (id) => state.meals.find((m) => m.id === id);
@@ -660,9 +667,10 @@ async function flushSave() {
   try {
     await db.saveWeek(state.week);
     if (!saveTimer) setSaveStatus('saved');
-  } catch {
+  } catch (err) {
     // no silent failure: keep the edits in memory and surface the banner —
-    // Retry (or connectivity returning) sends this same week row again
+    // transient failures offer Retry, permanent ones an honest Reload
+    state.saveErrorPermanent = !!err?.permanent;
     setSaveStatus('error');
   } finally {
     saveInFlight = false;
@@ -720,10 +728,15 @@ function viewHeader() {
 
 function viewSaveErrorBanner() {
   if (state.saveStatus !== 'error') return '';
+  const permanent = state.saveErrorPermanent;
   return `
     <div class="banner" id="save-banner" role="status">
-      <span>Couldn't save — check your connection. Your changes are still here; retry sends them again.</span>
-      <button data-action="retry-save" type="button">Retry</button>
+      <span>${permanent
+        ? "Something's wrong with this week's data and retrying can't fix it — reload the app."
+        : "Couldn't save — check your connection. Your changes are still here; retry sends them again."}</span>
+      ${permanent
+        ? '<button data-action="reload" type="button">Reload</button>'
+        : '<button data-action="retry-save" type="button">Retry</button>'}
     </div>`;
 }
 
@@ -1125,6 +1138,7 @@ const actions = {
 
   'retry-sync': () => { resync(); },
   'retry-save': () => { flushSave(); },
+  'reload': () => { location.reload(); },
 };
 
 document.addEventListener('click', (e) => {
