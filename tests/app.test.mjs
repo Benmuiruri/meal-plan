@@ -28,7 +28,8 @@ const { state, db, scheduleSave, flushSave } =
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // a controllable fake for db.client — the .update() and .upsert() chains saveWeek uses
-function fakeWeeksClient({ matchedRows = [{ id: 'w1' }], failWith = null, failUpsertWith = null, delayMs = 0 } = {}) {
+function fakeWeeksClient({ matchedRows = [{ id: 'w1' }], failWith = null, failUpsertWith = null,
+                           restoredId = 'w1', delayMs = 0 } = {}) {
   const calls = [];
   return {
     calls,
@@ -37,13 +38,19 @@ function fakeWeeksClient({ matchedRows = [{ id: 'w1' }], failWith = null, failUp
       const b = {
         op: null,
         update(payload) { b.op = 'update'; calls.push({ op: 'update', payload }); return b; },
-        upsert(payload) { b.op = 'upsert'; calls.push({ op: 'upsert', payload }); return b; },
+        upsert(payload, opts) { b.op = 'upsert'; calls.push({ op: 'upsert', payload, opts }); return b; },
         eq: () => b,
         select: () => b,
+        single: () => b,
         async then(resolve) {
           if (delayMs) await sleep(delayMs);
-          if (b.op === 'upsert') resolve({ data: null, error: failUpsertWith });
-          else resolve(failWith ? { data: null, error: failWith } : { data: matchedRows, error: null });
+          if (b.op === 'upsert') {
+            resolve(failUpsertWith
+              ? { data: null, error: failUpsertWith }
+              : { data: { id: restoredId }, error: null });
+          } else {
+            resolve(failWith ? { data: null, error: failWith } : { data: matchedRows, error: null });
+          }
         },
       };
       return b;
@@ -63,19 +70,30 @@ beforeEach(() => {
   db.client = fakeWeeksClient();
 });
 
-test('saveWeek recreates the row when the update matches zero rows', async () => {
-  db.client = fakeWeeksClient({ matchedRows: [] });
+test('saveWeek restores a vanished row on the natural key and adopts the canonical id', async () => {
+  db.client = fakeWeeksClient({ matchedRows: [], restoredId: 'w2' });
   await assert.doesNotReject(db.saveWeek(state.week));
   const upserts = db.client.ops('upsert');
   assert.equal(upserts.length, 1);
-  assert.equal(upserts[0].payload.id, 'w1');            // same identity
+  // conflict target is (user_id, week_start), never the id — another device
+  // may have recreated this week under a fresh uuid
+  assert.equal(upserts[0].opts.onConflict, 'user_id,week_start');
+  assert.equal('id' in upserts[0].payload, false);
   assert.equal(upserts[0].payload.user_id, 'u1');
   assert.equal(upserts[0].payload.budget, 2500);        // same content
+  assert.equal(state.week.id, 'w2');                    // adopted the canonical row
 });
 
 test('saveWeek fails loudly when the restore also fails', async () => {
   db.client = fakeWeeksClient({ matchedRows: [], failUpsertWith: { message: 'conflict' } });
   await assert.rejects(db.saveWeek(state.week));
+});
+
+test('saveWeek refuses to restore from an incomplete week object', async () => {
+  db.client = fakeWeeksClient({ matchedRows: [] });
+  delete state.week.user_id;
+  await assert.rejects(db.saveWeek(state.week), /incomplete/);
+  assert.equal(db.client.ops('upsert').length, 0);
 });
 
 test('saveWeek does not upsert when the update matched a row', async () => {
@@ -116,5 +134,20 @@ test('saves are serialized and a stale completion cannot stamp Saved over pendin
   assert.equal(state.saveStatus, 'saving');
   await sleep(300);                            // deferred flush fires after A lands
   assert.equal(db.client.ops('update').length, 2);
+  assert.equal(state.saveStatus, 'saved');
+});
+
+test('a flush deferred behind an in-flight request fires immediately once the tab is hidden', async () => {
+  db.client = fakeWeeksClient({ delayMs: 60 });
+  state.saveStatus = 'saving';
+  const first = flushSave();                   // request A, in flight
+  await sleep(10);
+  await flushSave();                           // deferred onto the 200ms timer
+  document.visibilityState = 'hidden';
+  await first;                                 // A completes while hidden
+  await sleep(20);                             // far below the 200ms timer —
+  assert.equal(db.client.ops('update').length, 2); // — the re-flush must not wait for it
+  document.visibilityState = 'visible';
+  await sleep(150);                            // let the trailing request settle
   assert.equal(state.saveStatus, 'saved');
 });

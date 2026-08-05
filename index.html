@@ -587,17 +587,22 @@ const db = {
       .update(payload).eq('id', week.id).select('id');
     if (error) throw error;
     if (data && data.length > 0) return;
-    // an update matching zero rows reports no error, but the row is gone
-    // (deleted elsewhere, reset project) — recreate it with the same id and
-    // content rather than letting every retry fail forever
-    const { error: restoreError } = await this.client.from('weeks').upsert({
-      id: week.id,
-      user_id: week.user_id,
-      week_start: week.week_start,
-      status: week.status,
-      ...payload,
-    });
+    // An update matching zero rows reports no error, but the row is gone
+    // (deleted elsewhere, reset project) — restore it rather than letting
+    // every retry fail forever. Conflict on the natural key, not the id:
+    // another device may have already recreated this week under a fresh id,
+    // and inserting a second (user_id, week_start) row would 23505 forever.
+    if (!week.user_id || !week.week_start) throw new Error('week row incomplete — cannot restore');
+    const { data: restored, error: restoreError } = await this.client.from('weeks')
+      .upsert({
+        user_id: week.user_id,
+        week_start: week.week_start,
+        status: week.status,
+        ...payload,
+      }, { onConflict: 'user_id,week_start' })
+      .select('id').single();
     if (restoreError) throw restoreError;
+    week.id = restored.id; // adopt the canonical row, whoever created it
   },
 
   async addMeal(userId, { name, kind, image_url, tint }) {
@@ -661,7 +666,6 @@ async function flushSave() {
     setSaveStatus('error');
   } finally {
     saveInFlight = false;
-    updateSaveBanner();
     // if edits queued behind this request while the tab went hidden, don't
     // trust a throttled background timer — send them now, while the page is
     // still alive to complete the request
@@ -682,6 +686,8 @@ function updateSaveBanner() {
 
 function setSaveStatus(status) {
   state.saveStatus = status;
+  updateSaveBanner(); // banner visibility tracks every transition, so a
+                      // resumed edit clears "Couldn't save" immediately
   const el = $('#save-state');
   if (el) {
     el.dataset.status = status;
