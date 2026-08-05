@@ -632,6 +632,7 @@ async function signIn(email, password) {
     return false;
   }
   state.errorMsg = '';
+  state.signinEmail = ''; // never pre-fill a future sign-in with a failed address
   state.session = data.session;
   return true;
 }

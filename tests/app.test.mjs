@@ -116,13 +116,39 @@ test('signIn surfaces other auth errors verbatim', async () => {
   assert.equal(state.errorMsg, 'Too many requests');
 });
 
-test('signIn success stores the session and clears the error', async () => {
+test('signIn success stores the session, clears the error and the kept email', async () => {
   state.errorMsg = 'stale';
+  state.signinEmail = 'typoed@example.com';   // left over from a failed attempt
   const session = { user: { id: 'u1' } };
   db.client = authClient({ data: { session }, error: null });
   assert.equal(await signIn('a@b.com', 'right'), true);
   assert.equal(state.session, session);
   assert.equal(state.errorMsg, '');
+  assert.equal(state.signinEmail, '', 'a failed address must not pre-fill a future sign-in');
+});
+
+test('the real sign-in template emits the kept email into the value attribute', async () => {
+  const tmplStart = html.indexOf('function viewSignin');
+  const tmplEnd = html.indexOf('function viewError');
+  assert.ok(tmplStart > 0 && tmplEnd > tmplStart, 'sign-in template markers found in index.html');
+  const mod = await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(
+    `const state = { signinEmail: 'kept@example.com', errorMsg: '' };
+     const esc = (s) => String(s);
+     const viewGate = (inner) => inner;
+     ${html.slice(tmplStart, tmplEnd)}
+     export { viewSignin };`));
+  const out = mod.viewSignin();
+  assert.match(out, /value="kept@example\.com"/);
+  assert.match(out, /type="password"/);
+});
+
+test('the sign-in submit glue kicks initData directly (a stalled SIGNED_IN cannot strand loading)', () => {
+  const hStart = html.indexOf("if (form.id === 'form-signin')");
+  const hEnd = html.indexOf("if (form.id === 'form-addmeal')");
+  assert.ok(hStart > 0 && hEnd > hStart, 'sign-in handler markers found in index.html');
+  const handler = html.slice(hStart, hEnd);
+  assert.match(handler, /await signIn\(/);
+  assert.match(handler, /initData\(\)/);
 });
 
 test('saveWeek restores a vanished row on the natural key and adopts the canonical id', async () => {
