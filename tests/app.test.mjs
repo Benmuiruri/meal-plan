@@ -152,8 +152,11 @@ test('the sign-in submit glue kicks initData directly (a stalled SIGNED_IN canno
   const hStart = html.indexOf("if (form.id === 'form-signin')");
   const hEnd = html.indexOf("if (form.id === 'form-addmeal')");
   assert.ok(hStart > 0 && hEnd > hStart, 'sign-in handler markers found in index.html');
-  // strip line comments so a commented-out call cannot satisfy the pin
-  const live = html.slice(hStart, hEnd).replace(/\/\/[^\n]*/g, '');
+  // strip block then line comments so no commented-out call, in either
+  // style, can satisfy the pin
+  const live = html.slice(hStart, hEnd)
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/[^\n]*/g, '');
   assert.match(live, /await signIn\(/);
   assert.match(live, /initData\(\)/);
 });
