@@ -88,8 +88,7 @@ beforeEach(() => {
   state.week = {
     id: 'w1', user_id: 'u1', week_start: '2026-08-03', budget: 2500, status: 'draft',
     picks: { mains: [], breakfasts: [] }, days: {},
-    groceries: [{ id: 'g1', stapleId: 's1', name: 'Eggs', unit: null, price: 100, checked: false }],
-    use_remainder: false,
+    groceries: [{ id: 'g1', stapleId: 's1', name: 'Eggs', price: 100, checked: false }],
   };
   db.client = fakeWeeksClient();
 });
