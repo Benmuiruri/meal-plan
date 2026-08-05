@@ -322,3 +322,67 @@ test('a flush deferred behind an in-flight request fires immediately once the ta
     document.visibilityState = 'visible';      // never leak a hidden document to later tests
   }
 });
+
+// ── PGRST303 skew retry ────────────────────────────────────────────────
+// "JWT issued at future": a freshly minted token can look post-dated to a
+// Supabase node whose clock runs a beat behind the issuer's. The rejection
+// happens during auth, before the query executes, so a single delayed
+// re-run must absorb it — seen live on first production sign-in.
+
+// counts attempts across any select/insert chain; errors[i] fails attempt i
+function fakeRetryClient(errors, data = [{ id: 's1' }]) {
+  const counter = { attempts: 0 };
+  return {
+    counter,
+    from() {
+      const b = {
+        insert: () => b, select: () => b, single: () => b, eq: () => b, order: () => b,
+        async then(resolve) {
+          const error = errors[counter.attempts] ?? null;
+          counter.attempts++;
+          resolve(error ? { data: null, error } : { data, error: null });
+        },
+      };
+      return b;
+    },
+  };
+}
+
+const SKEW = { code: 'PGRST303', message: 'JWT issued at future' };
+
+// intercept the retry's setTimeout so the test records the delay but never waits it out
+async function withInstantTimers(run) {
+  const delays = [];
+  const realSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (fn, ms, ...rest) => { delays.push(ms); return realSetTimeout(fn, 0, ...rest); };
+  try { await run(); } finally { globalThis.setTimeout = realSetTimeout; }
+  return delays;
+}
+
+test('a PGRST303 rejection is retried once after a skew-sized delay, then succeeds', async () => {
+  const rows = [{ id: 's1' }, { id: 's2' }];
+  db.client = fakeRetryClient([SKEW], rows);
+  let result;
+  const delays = await withInstantTimers(async () => { result = await db.seedStaples('u1'); });
+  assert.equal(result, rows);                  // second attempt's data came back
+  assert.equal(db.client.counter.attempts, 2);
+  assert.equal(delays.length, 1, 'exactly one retry delay');
+  assert.ok(delays[0] >= 1000, `the delay must outlive the ~1s skew (got ${delays[0]}ms)`);
+});
+
+test('a second PGRST303 failure surfaces instead of retrying forever', async () => {
+  db.client = fakeRetryClient([SKEW, SKEW]);
+  await withInstantTimers(async () => {
+    await assert.rejects(db.seedStaples('u1'), (err) => err.code === 'PGRST303');
+  });
+  assert.equal(db.client.counter.attempts, 2); // one retry, then give up
+});
+
+test('non-skew errors propagate immediately without a retry', async () => {
+  db.client = fakeRetryClient([{ code: 'PGRST301', message: 'JWT expired' }]);
+  const delays = await withInstantTimers(async () => {
+    await assert.rejects(db.seedStaples('u1'), (err) => err.code === 'PGRST301');
+  });
+  assert.equal(db.client.counter.attempts, 1);
+  assert.equal(delays.length, 0, 'no delay may be scheduled for a non-skew error');
+});

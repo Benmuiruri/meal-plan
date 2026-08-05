@@ -619,6 +619,26 @@ const db = {
   },
 };
 
+// PGRST303 — "JWT issued at future": a freshly minted access token can look
+// post-dated to a Supabase node whose clock runs a beat behind the issuer's.
+// The rejection happens during auth, before the query executes, so nothing
+// ran and a blind re-run is safe. The skew is about a second; one delayed
+// retry absorbs it instead of surfacing a fatal-looking error.
+const SKEW_RETRY_MS = 2000;
+async function withSkewRetry(run) {
+  try {
+    return await run();
+  } catch (err) {
+    if (err?.code !== 'PGRST303') throw err;
+    await new Promise((resolve) => setTimeout(resolve, SKEW_RETRY_MS));
+    return run();
+  }
+}
+for (const [name, method] of Object.entries(db)) {
+  if (typeof method !== 'function') continue;
+  db[name] = function (...args) { return withSkewRetry(() => method.apply(this, args)); };
+}
+
 // Sign in with the shared household credentials. Pure state transition —
 // rendering and data loading stay with the caller.
 async function signIn(email, password) {
