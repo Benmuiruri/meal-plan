@@ -619,12 +619,30 @@ const db = {
   },
 };
 
+// Sign in with the shared household credentials. Pure state transition —
+// rendering and data loading stay with the caller.
+async function signIn(email, password) {
+  const { data, error } = await db.client.auth.signInWithPassword({ email, password });
+  if (error) {
+    state.signinEmail = email; // survive the re-render; only the password needs retyping
+    // key on the stable error code, with the message as a fallback for older responses
+    state.errorMsg = (error.code === 'invalid_credentials' || error.message === 'Invalid login credentials')
+      ? 'Wrong email or password.'
+      : error.message;
+    return false;
+  }
+  state.errorMsg = '';
+  state.session = data.session;
+  return true;
+}
+
 /* ================================================================
    6. STATE
    ================================================================ */
 const state = {
   phase: 'loading',   // loading | config | signin | ready | error
   errorMsg: '',
+  signinEmail: '',    // survives a failed attempt so only the password is retyped
   session: null,
   meals: [],
   staples: [],
@@ -780,7 +798,7 @@ function viewSignin() {
     <h2>Sign in</h2>
     <p>One household account — the same email and password works for both of you, on any device. Each device stays signed in.</p>
     <form id="form-signin">
-      <input class="field" type="email" name="email" placeholder="Email" required autocomplete="username">
+      <input class="field" type="email" name="email" placeholder="Email" required autocomplete="username" value="${esc(state.signinEmail)}">
       <input class="field" type="password" name="password" placeholder="Password" required autocomplete="current-password">
       <button class="btn-primary" type="submit">Sign in</button>
       ${state.errorMsg ? `<p class="error">${esc(state.errorMsg)}</p>` : ''}
@@ -1201,19 +1219,13 @@ document.addEventListener('submit', async (e) => {
   const form = e.target;
 
   if (form.id === 'form-signin') {
-    const email = form.email.value.trim();
-    const password = form.password.value;
     form.querySelector('button').disabled = true;
-    const { error } = await db.client.auth.signInWithPassword({ email, password });
-    if (error) {
-      state.errorMsg = error.message === 'Invalid login credentials'
-        ? 'Wrong email or password.'
-        : error.message;
-      render();
-    } else {
-      // SIGNED_IN fires through onAuthStateChange and initData takes over
-      state.errorMsg = '';
+    const ok = await signIn(form.email.value.trim(), form.password.value);
+    if (ok) {
       state.phase = 'loading';
+      render();
+      initData(); // belt and braces with the SIGNED_IN event — initInFlight dedupes
+    } else {
       render();
     }
   }

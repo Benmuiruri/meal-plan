@@ -38,9 +38,9 @@ assert.ok(start > 0 && viewsBanner > start, 'section markers found in index.html
 const src = html.slice(start, viewsBanner) + `
 function render() {}
 function viewSaveErrorBanner() { const k = state.saveErrorPermanent ? 'permanent' : 'transient'; return '<banner data-kind="' + k + '">' + k + '</banner>'; }
-export { state, db, scheduleSave, flushSave };`;
+export { state, db, scheduleSave, flushSave, signIn };`;
 
-const { state, db, scheduleSave, flushSave } =
+const { state, db, scheduleSave, flushSave, signIn } =
   await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(src));
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -82,6 +82,9 @@ beforeEach(() => {
   state.phase = 'ready';
   state.saveStatus = 'saved';
   state.saveErrorPermanent = false;
+  state.errorMsg = '';
+  state.signinEmail = '';
+  state.session = null;
   state.week = {
     id: 'w1', user_id: 'u1', week_start: '2026-08-03', budget: 2500, status: 'draft',
     picks: { mains: [], breakfasts: [] }, days: {},
@@ -89,6 +92,37 @@ beforeEach(() => {
     use_remainder: false,
   };
   db.client = fakeWeeksClient();
+});
+
+const authClient = (result) => ({ auth: { signInWithPassword: async () => result } });
+
+test('signIn maps invalid credentials to a friendly error by stable code', async () => {
+  db.client = authClient({ data: {}, error: { code: 'invalid_credentials', message: 'anything Supabase says' } });
+  assert.equal(await signIn('a@b.com', 'wrong'), false);
+  assert.equal(state.errorMsg, 'Wrong email or password.');
+  assert.equal(state.signinEmail, 'a@b.com');  // survives the form re-render
+  assert.equal(state.session, null);
+});
+
+test('signIn falls back to matching the legacy message when no code is present', async () => {
+  db.client = authClient({ data: {}, error: { message: 'Invalid login credentials' } });
+  assert.equal(await signIn('a@b.com', 'wrong'), false);
+  assert.equal(state.errorMsg, 'Wrong email or password.');
+});
+
+test('signIn surfaces other auth errors verbatim', async () => {
+  db.client = authClient({ data: {}, error: { code: 'over_request_rate_limit', message: 'Too many requests' } });
+  assert.equal(await signIn('a@b.com', 'pw'), false);
+  assert.equal(state.errorMsg, 'Too many requests');
+});
+
+test('signIn success stores the session and clears the error', async () => {
+  state.errorMsg = 'stale';
+  const session = { user: { id: 'u1' } };
+  db.client = authClient({ data: { session }, error: null });
+  assert.equal(await signIn('a@b.com', 'right'), true);
+  assert.equal(state.session, session);
+  assert.equal(state.errorMsg, '');
 });
 
 test('saveWeek restores a vanished row on the natural key and adopts the canonical id', async () => {
