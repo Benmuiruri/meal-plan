@@ -18,7 +18,9 @@ const fakeHeader = {
     dom.inserts++;
     dom.banner = {
       html,
-      dataset: { kind: html.includes('permanent') ? 'permanent' : 'transient' },
+      // read the same attribute production updateSaveBanner reads — no
+      // hand-rolled html→kind mapping that can drift from the real contract
+      dataset: { kind: /data-kind="([^"]+)"/.exec(html)?.[1] },
       remove: () => { dom.banner = null; },
     };
   },
@@ -35,7 +37,7 @@ assert.ok(start > 0 && viewsBanner > start, 'section markers found in index.html
 
 const src = html.slice(start, viewsBanner) + `
 function render() {}
-function viewSaveErrorBanner() { return '<banner>' + (state.saveErrorPermanent ? 'permanent' : 'transient') + '</banner>'; }
+function viewSaveErrorBanner() { const k = state.saveErrorPermanent ? 'permanent' : 'transient'; return '<banner data-kind="' + k + '">' + k + '</banner>'; }
 export { state, db, scheduleSave, flushSave };`;
 
 const { state, db, scheduleSave, flushSave } =
@@ -182,16 +184,19 @@ test('the real banner template pairs permanent with Reload and transient with Re
   };
   const perm = await mkBanner(true);
   assert.match(perm, /data-action="reload"/);
+  assert.match(perm, /data-kind="permanent"/); // the attribute updateSaveBanner's keep/rebuild gate reads
   assert.match(perm, /will be lost/);          // Reload admits it discards unsaved edits
   assert.doesNotMatch(perm, /data-action="retry-save"/);
   const transient = await mkBanner(false);
   assert.match(transient, /data-action="retry-save"/);
+  assert.match(transient, /data-kind="transient"/);
   assert.doesNotMatch(transient, /data-action="reload"/);
   // and both actions are keys of the real dispatch table, not just strings
   // somewhere in the file
   const actionsStart = html.indexOf('const actions = {');
-  assert.ok(actionsStart > 0, 'actions map found in index.html');
-  const actionsSrc = html.slice(actionsStart, html.indexOf('\n};', actionsStart));
+  const actionsEnd = html.indexOf('\n};', actionsStart);
+  assert.ok(actionsStart > 0 && actionsEnd > actionsStart, 'actions map markers found in index.html');
+  const actionsSrc = html.slice(actionsStart, actionsEnd);
   assert.match(actionsSrc, /'retry-save':/);
   assert.match(actionsSrc, /'reload':/);
 });
