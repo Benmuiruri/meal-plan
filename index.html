@@ -268,6 +268,13 @@ h2.screen-title {
 .slot--dinner .tag { color: var(--mustard); }
 .slot--lunch { color: var(--chalk-dim); }
 .slot--lunch .meal { font-size: 13px; font-style: italic; font-weight: 400; }
+.slot--lunch .lunch-input {
+  flex: 1; min-width: 0; padding: 0;
+  background: transparent; border: none; border-radius: 4px;
+  color: var(--chalk); font: inherit; font-size: 13px; font-style: italic;
+}
+.slot--lunch .lunch-input::placeholder { color: var(--chalk-dim); opacity: 1; }
+.slot--lunch .lunch-input:focus { outline: 2px solid var(--mustard); outline-offset: 3px; }
 button.slot:active { background: rgba(251,246,234,0.12); }
 .slot.is-lifted {
   border-color: var(--mustard); background: rgba(242,178,27,0.14);
@@ -308,7 +315,6 @@ button.slot:active { background: rgba(251,246,234,0.12); }
   padding: 10px 4px; border-bottom: 1px solid var(--line);
 }
 .g-row .g-name { flex: 1; font-weight: 500; font-size: 15px; }
-.g-row .g-unit { font-size: 12px; color: var(--ink-dim); margin-left: 6px; font-weight: 400; }
 .g-row input.g-price {
   width: 84px; text-align: right;
   font-family: var(--mono); font-size: 15px;
@@ -316,6 +322,11 @@ button.slot:active { background: rgba(251,246,234,0.12); }
 }
 .g-row input.g-price:focus { border-color: var(--ink); outline: none; }
 .g-row input.g-price:disabled { background: transparent; border-color: transparent; }
+
+/* amounts are typed, never nudged — no spinner arrows on any number input */
+input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
 
 .tick { position: relative; width: 26px; height: 26px; flex-shrink: 0; }
 .tick input { position: absolute; inset: 0; opacity: 0; margin: 0; cursor: pointer; }
@@ -340,14 +351,6 @@ button.slot:active { background: rgba(251,246,234,0.12); }
   padding: 0 16px; border-radius: 10px; flex-shrink: 0;
 }
 .add-item button:disabled { opacity: 0.4; }
-
-.fruits-row {
-  display: flex; align-items: center; gap: 10px;
-  margin-top: 16px; padding: 12px;
-  background: rgba(46,125,70,0.1); border: 2px dashed var(--leaf); border-radius: 10px;
-}
-.fruits-row .g-name { flex: 1; font-weight: 600; color: var(--leaf); }
-.fruits-row .money { color: var(--leaf); font-weight: 500; }
 
 .totals {
   position: fixed; left: 0; right: 0; bottom: var(--tabbar-h); z-index: 29;
@@ -427,7 +430,7 @@ const SEED_BREAKFASTS = [
 const SEED_STAPLES = [
   { name: 'Maize',        price: 50 },
   { name: 'Eggs',         price: 100 },
-  { name: 'Beans',        unit: '1kg' },
+  { name: 'Beans' },
   { name: 'Carrots' },
   { name: 'Spinach' },
   { name: 'Bell peppers' },
@@ -435,6 +438,7 @@ const SEED_STAPLES = [
   { name: 'Chicken',      price: 400 },
   { name: 'Pork',         price: 350 },
   { name: 'Beef',         price: 200 },
+  { name: 'Fruits' },
 ];
 
 /* ================================================================
@@ -475,11 +479,13 @@ function picksComplete(week) {
 }
 
 // Keep day assignments consistent with picks: drop meals no longer picked,
-// deduplicate, then fill empty days from picks in order.
+// deduplicate, then fill empty days from picks in order. Free-text lunch
+// overrides are the user's own words, not picks — they ride along untouched.
 function reconcileDays(picks, days) {
   const out = {};
   for (const k of DAY_KEYS) {
     out[k] = { breakfast: days?.[k]?.breakfast ?? null, dinner: days?.[k]?.dinner ?? null };
+    if (days?.[k]?.lunch) out[k].lunch = days[k].lunch;
   }
   const slots = [['breakfast', picks.breakfasts], ['dinner', picks.mains]];
   for (const [slot, list] of slots) {
@@ -504,10 +510,14 @@ function swapSlots(days, slot, dayA, dayB) {
   return out;
 }
 
-// Lunch is never stored: it is always the previous day's dinner. Monday has none.
+// Lunch defaults to the previous day's dinner (Monday has none) and is only
+// stored when the user types their own — { custom } beats { mealId }.
 function lunchFor(days, dayKey) {
+  const custom = days?.[dayKey]?.lunch;
+  if (custom) return { custom };
   const i = DAY_KEYS.indexOf(dayKey);
-  return i <= 0 ? null : days[DAY_KEYS[i - 1]]?.dinner ?? null;
+  const id = i <= 0 ? null : days[DAY_KEYS[i - 1]]?.dinner ?? null;
+  return id ? { mealId: id } : null;
 }
 
 function computeTotals(week) {
@@ -523,11 +533,6 @@ function budgetTone({ budget, remaining }) {
   if (budget > 0 && remaining < budget * 0.1) return 'amber';
   return 'green';
 }
-
-// The fruits line is display-only and never part of the total —
-// otherwise enabling it would pin "remaining" to zero.
-const fruitsAmount = (totals) =>
-  totals.remaining == null ? null : Math.max(totals.remaining, 0);
 
 /* ================================================================
    5. DATA LAYER — every Supabase call lives here
@@ -557,7 +562,7 @@ const db = {
 
   async seedStaples(userId) {
     const rows = SEED_STAPLES.map((s, i) => ({
-      user_id: userId, name: s.name, unit: s.unit ?? null, last_price: s.price ?? null, sort_order: i,
+      user_id: userId, name: s.name, last_price: s.price ?? null, sort_order: i,
     }));
     const { data, error } = await this.client.from('staples').insert(rows).select();
     if (error) throw error;
@@ -581,7 +586,6 @@ const db = {
       picks: week.picks,
       days: week.days,
       groceries: week.groceries,
-      use_remainder: week.use_remainder,
     };
     const { data, error } = await this.client.from('weeks')
       .update(payload).eq('id', week.id).select('id');
@@ -787,7 +791,7 @@ function viewSaveErrorBanner() {
 }
 
 function viewTabbar() {
-  const tabs = [['pick', 'Pick'], ['week', 'Week'], ['budget', 'Budget'], ['summary', 'Summary']];
+  const tabs = [['pick', 'Choose meals'], ['week', 'Menu'], ['budget', 'Budget'], ['summary', 'Summary']];
   return `
     <nav class="tabbar">
       ${tabs.map(([key, label]) => `
@@ -901,7 +905,7 @@ function viewWeek() {
     return `
       <div class="screen">
         <div class="week-locked">
-          <p class="big">Pick 7 mains and 7 breakfasts to build your week.</p>
+          <p class="big">Choose 7 mains and 7 breakfasts to build your menu.</p>
           <p class="counts money">Mains ${w.picks.mains.length}/7 · Breakfasts ${w.picks.breakfasts.length}/7</p>
         </div>
       </div>`;
@@ -920,17 +924,23 @@ function viewWeek() {
       <div class="board">
         <div class="board-head">This week's menu</div>
         ${DAY_KEYS.map((day) => {
-          const lunchId = lunchFor(w.days, day);
+          const lunch = lunchFor(w.days, day);
+          // default lunch lives in the placeholder: type over it to override,
+          // clear the text to fall back to yesterday's pot
+          const fallback = lunch?.mealId
+            ? `${mealName(lunch.mealId)} — from ${DAY_NAMES[DAY_KEYS[DAY_KEYS.indexOf(day) - 1]]}'s pot`
+            : 'Add a lunch';
           return `
             <div class="board-day">
               <div class="day-name">${DAY_NAMES[day]}</div>
               ${slotBtn(day, 'breakfast', 'Breakfast', w.days[day]?.breakfast)}
               ${slotBtn(day, 'dinner', 'Tonight', w.days[day]?.dinner)}
-              ${lunchId ? `
-                <div class="slot slot--lunch">
-                  <span class="tag">Lunch</span>
-                  <span class="meal">${esc(mealName(lunchId))} — from ${DAY_NAMES[DAY_KEYS[DAY_KEYS.indexOf(day) - 1]]}'s pot</span>
-                </div>` : ''}
+              <div class="slot slot--lunch">
+                <span class="tag">Lunch</span>
+                <input class="lunch-input" type="text" maxlength="80" autocomplete="off"
+                       data-change="lunch" data-day="${day}" aria-label="${DAY_NAMES[day]}'s lunch"
+                       value="${esc(lunch?.custom ?? '')}" placeholder="${esc(fallback)}">
+              </div>
             </div>`;
         }).join('')}
       </div>
@@ -969,7 +979,7 @@ function viewBudget() {
               <input type="checkbox" data-change="staple" data-id="${s.id}" ${row ? 'checked' : ''}>
               <span class="box">✓</span>
             </label>
-            <span class="g-name">${esc(s.name)}${s.unit ? `<span class="g-unit">${esc(s.unit)}</span>` : ''}</span>
+            <span class="g-name">${esc(s.name)}</span>
             <input class="g-price" type="number" inputmode="decimal" min="0" step="any" placeholder="—"
                    value="${row?.price ?? ''}" data-input="price" data-row="${row?.id ?? ''}"
                    ${row ? '' : 'disabled'}>
@@ -990,22 +1000,8 @@ function viewBudget() {
         <button type="submit">Add</button>
       </form>
 
-      <label class="fruits-row">
-        <span class="tick">
-          <input type="checkbox" data-change="fruits" ${w.use_remainder ? 'checked' : ''}>
-          <span class="box">✓</span>
-        </span>
-        <span class="g-name">Fruits — whatever's left</span>
-        <span class="money" id="fruits-amount">${viewFruitsAmount()}</span>
-      </label>
-
       ${viewTotals()}
     </div>`;
-}
-
-function viewFruitsAmount() {
-  if (!state.week.use_remainder) return '';
-  return fmtNum(fruitsAmount(computeTotals(state.week)));
 }
 
 function viewTotals() {
@@ -1029,7 +1025,6 @@ function viewTotals() {
 
 function viewSummary() {
   const w = state.week;
-  const t = computeTotals(w);
   const hasWeek = picksComplete(w);
   return `
     <div class="screen">
@@ -1039,19 +1034,19 @@ function viewSummary() {
         <div class="board sum-board">
           <div class="board-head">Week of ${esc(w.week_start)}</div>
           ${DAY_KEYS.map((day) => {
-            const lunchId = lunchFor(w.days, day);
+            const lunch = lunchFor(w.days, day);
             return `
               <div class="sum-day">
                 <span class="d">${day.toUpperCase()}</span>
                 <span class="meals-col">
                   <span class="m-line"><span class="k">B</span>${esc(mealName(w.days[day]?.breakfast))}</span>
                   <span class="m-line"><span class="k">D</span>${esc(mealName(w.days[day]?.dinner))}</span>
-                  ${lunchId ? `<span class="m-line lunch"><span class="k">L</span>${esc(mealName(lunchId))}</span>` : ''}
+                  ${lunch ? `<span class="m-line lunch"><span class="k">L</span>${esc(lunch.custom ?? mealName(lunch.mealId))}</span>` : ''}
                 </span>
               </div>`;
           }).join('')}
         </div>` : `
-        <p class="empty-note">No menu yet — pick 7 mains and 7 breakfasts on the Pick tab.</p>`}
+        <p class="empty-note">No menu yet — choose 7 mains and 7 breakfasts on the Choose meals tab.</p>`}
 
       <p class="list-title">Grocery list</p>
       ${w.groceries.length === 0
@@ -1065,12 +1060,6 @@ function viewSummary() {
             <span class="g-name">${esc(g.name)}</span>
             <span class="money">${fmtNum(g.price)}</span>
           </div>`).join('')}
-      ${w.use_remainder ? `
-        <div class="g-row">
-          <span class="tick"></span>
-          <span class="g-name" style="color:var(--leaf);font-weight:600">Fruits — whatever's left</span>
-          <span class="money" style="color:var(--leaf)">${fmtNum(fruitsAmount(t))}</span>
-        </div>` : ''}
 
       ${viewTotals()}
     </div>`;
@@ -1099,8 +1088,6 @@ function updateTotals() {
   totals.dataset.tone = budgetTone(t);
   $('#total-num').textContent = fmtKsh(t.total);
   animateMoney($('#remaining-num'), t.remaining);
-  const fruits = $('#fruits-amount');
-  if (fruits) fruits.textContent = viewFruitsAmount();
 }
 
 function animateMoney(el, to) {
@@ -1215,7 +1202,7 @@ document.addEventListener('change', (e) => {
     if (el.checked) {
       state.week.groceries.push({
         id: crypto.randomUUID(), stapleId: staple.id, name: staple.name,
-        unit: staple.unit, price: staple.last_price, checked: false,
+        price: staple.last_price, checked: false,
       });
     } else {
       state.week.groceries = state.week.groceries.filter((g) => g.stapleId !== staple.id);
@@ -1224,10 +1211,15 @@ document.addEventListener('change', (e) => {
     render();
   }
 
-  if (el.dataset.change === 'fruits') {
-    state.week.use_remainder = el.checked;
+  // change fires on blur/Enter with the committed text — typed words become
+  // the day's lunch, an emptied field falls back to yesterday's pot
+  if (el.dataset.change === 'lunch') {
+    const day = state.week.days[el.dataset.day];
+    if (!day) return;
+    const text = el.value.trim();
+    if (text) day.lunch = text;
+    else delete day.lunch;
     scheduleSave();
-    render();
   }
 
   if (el.dataset.change === 'tick') {
@@ -1278,7 +1270,7 @@ document.addEventListener('submit', async (e) => {
     const price = parseMoney(form.price.value);
     state.week.groceries.push({
       id: crypto.randomUUID(), stapleId: null, name,
-      unit: null, price: price === undefined ? null : price, checked: false,
+      price: price === undefined ? null : price, checked: false,
     });
     scheduleSave();
     render();

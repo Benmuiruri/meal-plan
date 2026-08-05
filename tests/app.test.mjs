@@ -395,3 +395,44 @@ test('non-skew errors propagate immediately without a retry', async () => {
   assert.equal(db.client.counter.attempts, 1);
   assert.equal(delays2.length, 0, 'no delay may be scheduled for a non-JWT error');
 });
+
+// ── editable lunch: template + glue ────────────────────────────────────
+test('the menu board renders every lunch as an input: override escaped into value, default in placeholder', async () => {
+  const domStart = html.indexOf('const DAY_KEYS');
+  const domEnd = html.lastIndexOf('/* =', html.indexOf('5. DATA LAYER'));
+  const wkStart = html.indexOf('function viewWeek');
+  const wkEnd = html.indexOf('/* ---------- Budget');
+  assert.ok(wkStart > 0 && wkEnd > wkStart, 'viewWeek markers found in index.html');
+  const ids = (n, p) => Array.from({ length: n }, (_, i) => p + i);
+  const days = {};
+  ids(7, '').forEach((_, i) => {
+    days[['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'][i]] = { breakfast: 'b' + i, dinner: 'm' + i };
+  });
+  days.tue.lunch = '<b>Left"over</b>';       // hostile text must land escaped in the attribute
+  const mod = await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(`
+    ${html.slice(domStart, domEnd)}
+    const state = { lifted: null, week: {
+      picks: { mains: ${JSON.stringify(ids(7, 'm'))}, breakfasts: ${JSON.stringify(ids(7, 'b'))} },
+      days: ${JSON.stringify(days)},
+    } };
+    const mealName = (id) => id ? 'MEAL-' + id : '—';
+    ${html.slice(wkStart, wkEnd)}
+    export { viewWeek };`));
+  const out = mod.viewWeek();
+  assert.match(out, /value="&lt;b&gt;Left&quot;over&lt;\/b&gt;"/, 'override is emitted AND attribute-escaped');
+  assert.match(out, /placeholder="MEAL-m1 — from Tuesday&#39;s pot"/, 'default lunch lives in the placeholder');
+  assert.match(out, /placeholder="Add a lunch"/, 'Monday has no default but still takes a lunch');
+  assert.equal(out.match(/data-change="lunch"/g)?.length, 7, 'all seven days are editable');
+});
+
+test('the lunch change glue trims typed text and deletes the override when emptied', () => {
+  const hStart = html.indexOf("if (el.dataset.change === 'lunch')");
+  const hEnd = html.indexOf("if (el.dataset.change === 'tick')");
+  assert.ok(hStart > 0 && hEnd > hStart, 'lunch handler markers found in index.html');
+  const live = html.slice(hStart, hEnd)
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/[^\n]*/g, '');
+  assert.match(live, /el\.value\.trim\(\)/);
+  assert.match(live, /delete day\.lunch/, 'an emptied field must fall back to the default, not store ""');
+  assert.match(live, /scheduleSave\(\)/);
+});

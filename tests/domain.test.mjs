@@ -16,18 +16,16 @@ assert.ok(start > 0 && dataLayerBanner > start, 'section markers found in index.
 
 const src = html.slice(start, dataLayerBanner) + `
 export { DAY_KEYS, PICK_TARGET, parseMoney, currentMonday, picksComplete,
-         reconcileDays, swapSlots, lunchFor, computeTotals, budgetTone,
-         fruitsAmount };`;
+         reconcileDays, swapSlots, lunchFor, computeTotals, budgetTone };`;
 
 const {
   DAY_KEYS, PICK_TARGET, parseMoney, currentMonday, picksComplete,
   reconcileDays, swapSlots, lunchFor, computeTotals, budgetTone,
-  fruitsAmount,
 } = await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(src));
 
 const week = (over = {}) => ({
   budget: null, picks: { mains: [], breakfasts: [] }, days: {},
-  groceries: [], use_remainder: false, ...over,
+  groceries: [], ...over,
 });
 
 test('parseMoney: empty clears, invalid and negative are rejected', () => {
@@ -86,11 +84,33 @@ test('swapSlots trades one slot between two days and nothing else', () => {
   assert.equal(days.mon.dinner, 'm1');         // input not mutated
 });
 
-test('lunch is the previous day\'s dinner; Monday has none', () => {
+test('lunch defaults to the previous day\'s dinner; Monday has none', () => {
   const days = { mon: { dinner: 'm1' }, tue: { dinner: 'm2' } };
   assert.equal(lunchFor(days, 'mon'), null);
-  assert.equal(lunchFor(days, 'tue'), 'm1');
-  assert.equal(lunchFor(days, 'wed'), 'm2');
+  assert.deepEqual(lunchFor(days, 'tue'), { mealId: 'm1' });
+  assert.deepEqual(lunchFor(days, 'wed'), { mealId: 'm2' });
+});
+
+test('a free-text lunch override wins over the default, even on Monday', () => {
+  const days = {
+    mon: { dinner: 'm1', lunch: 'Eating out' },
+    tue: { dinner: 'm2', lunch: 'Leftover pilau' },
+    wed: { dinner: 'm3' },
+  };
+  assert.deepEqual(lunchFor(days, 'mon'), { custom: 'Eating out' });
+  assert.deepEqual(lunchFor(days, 'tue'), { custom: 'Leftover pilau' });
+  assert.deepEqual(lunchFor(days, 'wed'), { mealId: 'm2' }); // untouched day keeps the default
+});
+
+test('reconcileDays carries lunch overrides through a picks reshuffle', () => {
+  const picks = { mains: ['m1', 'm2'], breakfasts: [] };
+  const existing = {
+    mon: { dinner: 'gone', breakfast: null, lunch: 'Samosas' },
+    tue: { dinner: 'm2', breakfast: null },
+  };
+  const days = reconcileDays(picks, existing);
+  assert.equal(days.mon.lunch, 'Samosas');   // override survives the dinner being dropped
+  assert.equal(days.tue.lunch, undefined);   // no override invented for other days
 });
 
 test('computeTotals ignores null prices and rounds to cents', () => {
@@ -111,12 +131,6 @@ test('budgetTone: green at exactly 10% left, amber below, red past zero', () => 
   assert.equal(tone(300, 271), 'amber');
   assert.equal(tone(300, 301), 'red');
   assert.equal(budgetTone(computeTotals(week())), 'plain');
-});
-
-test('fruitsAmount claims the remainder but never goes negative', () => {
-  assert.equal(fruitsAmount({ remaining: 250 }), 250);
-  assert.equal(fruitsAmount({ remaining: -80 }), 0);
-  assert.equal(fruitsAmount({ remaining: null }), null);
 });
 
 test('PICK_TARGET is 7', () => assert.equal(PICK_TARGET, 7));

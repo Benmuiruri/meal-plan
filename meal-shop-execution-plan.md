@@ -29,7 +29,7 @@ The app keeps that exact rhythm. It removes the retyping, the jumping between no
 | Hosting | GitHub Pages, static |
 | Budget | Never blocks. Goes negative, colour warns. |
 | Theme | Bright, menu-board |
-| Swapping | Tap two dinners to trade days. Monday lunch implicit. |
+| Swapping | Tap two dinners to trade days. Lunch follows yesterday's dinner unless you've typed your own. |
 
 ---
 
@@ -80,13 +80,13 @@ The DDL lives in **`schema.sql`** at the repo root — that file is the single s
 
 ```
 picks      { mains: [mealId], breakfasts: [mealId] }
-days       { mon: { breakfast: mealId, dinner: mealId }, tue: {...}, ... }
+days       { mon: { breakfast: mealId, dinner: mealId, lunch?: text }, tue: {...}, ... }
 groceries  [ { name, price, checked, stapleId } ]
 ```
 
 ### Two modelling decisions worth naming
 
-**Lunch is never stored.** It's computed at render time as the previous day's dinner. That single choice means a swap can never leave your lunches inconsistent — there's no second copy to fall out of step. Monday carries no lunch row at all.
+**Lunch is stored only when you type it.** The default is computed at render time as the previous day's dinner, so a swap can never leave default lunches inconsistent — there's no second copy to fall out of step. Typing over a lunch stores your words as free text on that day; clearing the field deletes them and the default shows through again. Monday defaults to no lunch.
 
 **Days and groceries are `jsonb`, not normalised rows.** A week saves in one round trip instead of twenty, and the shape maps straight onto the screen. The cost: you can't easily query *"how often did I cook pasta this year."* Since history is read-only look-back, that query isn't on the table. If you ever want it, the JSON is still queryable in Postgres — just less pleasantly.
 
@@ -109,22 +109,22 @@ Bottom tab bar, four tabs, hash routing so your phone's back button behaves.
 ### Sign in
 Email and password, one button. The single household account is pre-created in Supabase — there is no sign-up flow in the app. On first-ever sign-in the app seeds your library and staples, so you land on a full Pick screen rather than an empty one. The session persists per device.
 
-### Pick
+### Choose meals
 Mains / Breakfasts toggle. Two-column card grid — image if you've added one, coloured name tile if not. Tap to select, tap again to drop. Sticky header counts `4 / 7` for the active tab. Last tile is **Add a meal**: name, kind, image, done. Long-press a card to edit or remove it.
 
-### Week
-Held behind a message until you have 7 mains and 7 breakfasts: *"Pick 7 mains and 7 breakfasts to build your week."*
+### Menu
+Held behind a message until you have 7 mains and 7 breakfasts: *"Choose 7 mains and 7 breakfasts to build your menu."*
 
-Then seven day cards, each showing breakfast, **cooking tonight**, and lunch in muted type noting it came from yesterday's pot. Monday shows no lunch.
+Then seven day cards, each showing breakfast, **cooking tonight**, and lunch. Lunch is an editable line: by default it shows yesterday's dinner in muted type (Monday starts empty), and typing over it stores your own words — *leftovers*, *eating out*, anything. Clearing the text brings the default back.
 
-Tap a dinner to lift it, tap another to trade — lunches shift with them automatically. Breakfasts swap the same way, independently.
+Tap a dinner to lift it, tap another to trade — default lunches shift with them automatically; lunches you typed stay put. Breakfasts swap the same way, independently.
 
 ### Budget
 Amount at top: *"To spend this week."*
 
-Then your staples, each a tick and an editable price prefilled from last time. Below, **Add an item** for anything off-list. Editing a staple's price updates its remembered value for next week.
+Then your staples — fruits included, a row like any other — each a tick and an editable price prefilled from last time. Below, **Add an item** for anything off-list. Editing a staple's price updates its remembered value for next week. Amounts are typed, never nudged: number inputs carry no spinner arrows.
 
-Sticky footer, always visible: total, then remaining in large mono numerals. Green while there's room, amber inside the last 10%, red and negative past zero. A **Fruits — whatever's left** toggle claims the remainder as its own line.
+Sticky footer, always visible: total, then remaining in large mono numerals. Green while there's room, amber inside the last 10%, red and negative past zero.
 
 ### Summary
 The single page you shop from. Week table, grocery list with prices, total against budget. **Save this week** flips the row to `saved` and opens a fresh draft.
@@ -165,7 +165,7 @@ Written on first sign-in, all editable, none permanent.
 
 **Breakfasts (15)** — weetabix; nwaci + egg + avocado; oats; uji + peanuts; boiled maize + egg; liver + vegetables; mandizi + vegetables; mushroom + scrambled; bone soup + buns; pumpkin soup + buns; butter soup + buns; smoothie + cake; grape salad; cornflakes + egg; mbaazi + mahamri
 
-**Staples** — maize 50, eggs 100, beans (1kg), carrots, spinach, bell peppers, lettuce, chicken 400, pork 350, beef 200
+**Staples** — maize 50, eggs 100, beans, carrots, spinach, bell peppers, lettuce, chicken 400, pork 350, beef 200, fruits
 
 ---
 
@@ -212,3 +212,4 @@ The sequence matters — auth emails (password resets) need to know your live UR
 3. Currency — **`KSh 1,200`** on totals and the budget figure; plain `1,200` on individual line items.
 4. Offline support — **removed entirely**, superseding the offline-ticks decision made earlier the same day. The app is used online only; section 4's market-connectivity concern was judged overstated in practice. Failed saves surface a *Not saved* banner with a Retry instead.
 5. Sign-in — **one shared household account with a password**, replacing magic links. Two people, one plan: separate accounts would mean separate RLS-scoped datasets. The account is pre-created in Supabase (no sign-up flow in the app); credentials live with the household, never in this repo.
+6. First-use feedback (same day): tabs renamed **Choose meals** and **Menu**; lunch became an editable free-text line defaulting to yesterday's dinner; the *Fruits — whatever's left* remainder toggle was dropped for a plain Fruits staple; number inputs lost their spinner arrows; the beans row lost its `1kg` unit tag (units are no longer shown anywhere).
