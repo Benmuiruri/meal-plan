@@ -12,9 +12,16 @@ import { readFile } from 'node:fs/promises';
 
 // Minimal observable DOM: just enough for updateSaveBanner's insert/remove to
 // be visible to assertions, so deleting the banner wiring fails the suite.
-const dom = { banner: null };
+const dom = { banner: null, inserts: 0 };
 const fakeHeader = {
-  insertAdjacentHTML: (_pos, html) => { dom.banner = { html, remove: () => { dom.banner = null; } }; },
+  insertAdjacentHTML: (_pos, html) => {
+    dom.inserts++;
+    dom.banner = {
+      html,
+      dataset: { kind: html.includes('permanent') ? 'permanent' : 'transient' },
+      remove: () => { dom.banner = null; },
+    };
+  },
 };
 globalThis.document = {
   visibilityState: 'visible',
@@ -69,6 +76,7 @@ function fakeWeeksClient({ matchedRows = [{ id: 'w1' }], failWith = null, failUp
 
 beforeEach(() => {
   dom.banner = null;
+  dom.inserts = 0;
   state.phase = 'ready';
   state.saveStatus = 'saved';
   state.saveErrorPermanent = false;
@@ -153,8 +161,20 @@ test('a banner already showing refreshes when a retry escalates to a permanent f
   assert.match(dom.banner.html, /permanent/, 'stale transient banner must be replaced');
 });
 
+test('a repeat of the same failure keeps the banner element (no focus-yanking rebuild)', async () => {
+  db.client = fakeWeeksClient({ failWith: { message: 'network down' } });
+  await flushSave();
+  assert.equal(dom.inserts, 1);
+  await flushSave();                           // Retry fails the same way again
+  assert.equal(dom.inserts, 1, 'identical banner must not be torn down and reinserted');
+  assert.ok(dom.banner);
+});
+
 test('the real banner template pairs permanent with Reload and transient with Retry', async () => {
-  const bannerSrc = html.slice(html.indexOf('function viewSaveErrorBanner'), html.indexOf('function viewTabbar'));
+  const tmplStart = html.indexOf('function viewSaveErrorBanner');
+  const tmplEnd = html.indexOf('function viewTabbar');
+  assert.ok(tmplStart > 0 && tmplEnd > tmplStart, 'banner template markers found in index.html');
+  const bannerSrc = html.slice(tmplStart, tmplEnd);
   const mkBanner = async (permanent) => {
     const mod = await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(
       `const state = { saveStatus: 'error', saveErrorPermanent: ${permanent} };\n${bannerSrc}\nexport { viewSaveErrorBanner };`));
@@ -167,9 +187,13 @@ test('the real banner template pairs permanent with Reload and transient with Re
   const transient = await mkBanner(false);
   assert.match(transient, /data-action="retry-save"/);
   assert.doesNotMatch(transient, /data-action="reload"/);
-  // and both actions are wired in the real actions map
-  assert.match(html, /'retry-save': \(\) =>/);
-  assert.match(html, /'reload': \(\) =>/);
+  // and both actions are keys of the real dispatch table, not just strings
+  // somewhere in the file
+  const actionsStart = html.indexOf('const actions = {');
+  assert.ok(actionsStart > 0, 'actions map found in index.html');
+  const actionsSrc = html.slice(actionsStart, html.indexOf('\n};', actionsStart));
+  assert.match(actionsSrc, /'retry-save':/);
+  assert.match(actionsSrc, /'reload':/);
 });
 
 test('banner clears when a retry succeeds', async () => {
