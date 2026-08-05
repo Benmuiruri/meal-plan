@@ -85,8 +85,8 @@ h2.screen-title {
 .brand .amp { color: var(--mustard); }
 .save-state { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: var(--chalk-dim); }
 .save-state .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--leaf); }
-.save-state[data-status="saving"]  .dot { background: var(--mustard); }
-.save-state[data-status="offline"] .dot { background: var(--tomato); }
+.save-state[data-status="saving"] .dot { background: var(--mustard); }
+.save-state[data-status="error"]  .dot { background: var(--tomato); }
 
 .banner {
   background: var(--tomato); color: var(--chalk);
@@ -437,9 +437,6 @@ const SEED_STAPLES = [
   { name: 'Beef',         price: 200 },
 ];
 
-const CACHE_KEY = 'mealshop.cache.v1';
-const TICKS_KEY = 'mealshop.ticks.v1';
-
 /* ================================================================
    3. UTILITIES
    ================================================================ */
@@ -532,15 +529,6 @@ function budgetTone({ budget, remaining }) {
 const fruitsAmount = (totals) =>
   totals.remaining == null ? null : Math.max(totals.remaining, 0);
 
-const groceryKey = (g) => g.stapleId || `name:${g.name.toLowerCase()}`;
-
-function applyTicks(week, ticks) {
-  const byKey = new Map(ticks.map((t) => [t.key, t.checked]));
-  for (const g of week.groceries) {
-    if (byKey.has(groceryKey(g))) g.checked = byKey.get(groceryKey(g));
-  }
-}
-
 /* ================================================================
    5. DATA LAYER — every Supabase call lives here
    ================================================================ */
@@ -588,14 +576,21 @@ const db = {
   },
 
   async saveWeek(week) {
-    const { error } = await this.client.from('weeks').update({
+    const { data, error } = await this.client.from('weeks').update({
       budget: week.budget,
       picks: week.picks,
       days: week.days,
       groceries: week.groceries,
       use_remainder: week.use_remainder,
-    }).eq('id', week.id);
+    }).eq('id', week.id).select('id');
     if (error) throw error;
+    // an update matching zero rows reports no error — that is a failed save,
+    // not a successful one
+    if (!data || data.length === 0) {
+      const gone = new Error('week row not found');
+      gone.code = 'WEEK_GONE';
+      throw gone;
+    }
   },
 
   async addMeal(userId, { name, kind, image_url, tint }) {
@@ -607,30 +602,7 @@ const db = {
 };
 
 /* ================================================================
-   6. OFFLINE CACHE & TICK QUEUE (localStorage)
-   ================================================================ */
-function writeCache(dirty = false) {
-  try {
-    localStorage.setItem(CACHE_KEY, JSON.stringify({
-      meals: state.meals, staples: state.staples, week: state.week, dirty,
-    }));
-  } catch { /* storage full or blocked — cache is best-effort */ }
-}
-function readCache() {
-  try { return JSON.parse(localStorage.getItem(CACHE_KEY)); } catch { return null; }
-}
-function readTicks() {
-  try { return JSON.parse(localStorage.getItem(TICKS_KEY)) ?? []; } catch { return []; }
-}
-function queueTick(key, checked) {
-  const ticks = readTicks().filter((t) => t.key !== key);
-  ticks.push({ key, checked });
-  try { localStorage.setItem(TICKS_KEY, JSON.stringify(ticks)); } catch { /* best-effort */ }
-}
-function clearTicks() { localStorage.removeItem(TICKS_KEY); }
-
-/* ================================================================
-   7. STATE
+   6. STATE
    ================================================================ */
 const state = {
   phase: 'loading',   // loading | config | signin | check-email | ready | error
@@ -643,20 +615,19 @@ const state = {
   pickTab: 'mains',   // mains | breakfasts
   lifted: null,       // { slot: 'dinner'|'breakfast', day: 'mon' }
   addOpen: false,
-  saveStatus: 'saved',
-  offline: false,
+  saveStatus: 'saved',  // saved | saving | error
 };
 
 const mealById = (id) => state.meals.find((m) => m.id === id);
 const mealName = (id) => mealById(id)?.name ?? '—';
 
 /* ================================================================
-   8. SAVE PIPELINE — debounced 800ms, loud on failure
+   7. SAVE PIPELINE — debounced 800ms, loud on failure
    ================================================================ */
 let saveTimer = null;
+let saveInFlight = false;
 
 function scheduleSave() {
-  if (state.offline) return;
   setSaveStatus('saving');
   clearTimeout(saveTimer);
   saveTimer = setTimeout(flushSave, 800);
@@ -665,17 +636,26 @@ function scheduleSave() {
 async function flushSave() {
   clearTimeout(saveTimer);
   saveTimer = null;
-  if (!state.week || state.offline) return;
+  if (!state.week) return;
+  // Saves are strictly serialized: firing a second request while one is in
+  // flight lets the requests land out of order server-side, and lets the
+  // first completion stamp "Saved" while newer edits are still airborne.
+  if (saveInFlight) {
+    saveTimer = setTimeout(flushSave, 200);
+    return;
+  }
+  saveInFlight = true;
   try {
     await db.saveWeek(state.week);
-    // an edit made while this request was in flight schedules a new timer —
-    // only a flush with no pending timer may declare the state saved
-    if (!saveTimer) {
-      setSaveStatus('saved');
-      writeCache();
-    }
+    if (!saveTimer) setSaveStatus('saved');
+    if ($('.banner')) render(); // a recovery clears the "couldn't save" banner
   } catch {
-    goOffline(true);
+    // no silent failure: show the banner and keep the edits in memory —
+    // Retry (or connectivity returning) sends this same week row again
+    setSaveStatus('error');
+    render();
+  } finally {
+    saveInFlight = false;
   }
 }
 
@@ -685,19 +665,12 @@ function setSaveStatus(status) {
   if (el) {
     el.dataset.status = status;
     el.querySelector('.label').textContent =
-      status === 'saving' ? 'Saving' : status === 'offline' ? 'Offline' : 'Saved';
+      status === 'saving' ? 'Saving' : status === 'error' ? 'Not saved' : 'Saved';
   }
 }
 
-function goOffline(dirty = false) {
-  state.offline = true;
-  state.saveStatus = 'offline';
-  writeCache(dirty);
-  render();
-}
-
 /* ================================================================
-   9. VIEWS
+   8. VIEWS
    ================================================================ */
 const ICONS = {
   pick: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="3.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.5"/></svg>',
@@ -708,7 +681,7 @@ const ICONS = {
 
 function viewHeader() {
   const label = state.saveStatus === 'saving' ? 'Saving'
-    : state.saveStatus === 'offline' ? 'Offline' : 'Saved';
+    : state.saveStatus === 'error' ? 'Not saved' : 'Saved';
   return `
     <header class="header">
       <span class="brand">MEAL <span class="amp">&amp;</span> SHOP</span>
@@ -718,12 +691,12 @@ function viewHeader() {
     </header>`;
 }
 
-function viewOfflineBanner() {
-  if (!state.offline) return '';
+function viewSaveErrorBanner() {
+  if (state.saveStatus !== 'error') return '';
   return `
     <div class="banner" role="status">
-      <span>Offline — showing your last saved copy. You can tick items off; other changes are locked until you're back online.</span>
-      <button data-action="retry-sync" type="button">Retry</button>
+      <span>Couldn't save — check your connection. Your changes are still here; retry sends them again.</span>
+      <button data-action="retry-save" type="button">Retry</button>
     </div>`;
 }
 
@@ -855,10 +828,9 @@ function viewWeek() {
   const lift = state.lifted;
   const slotBtn = (day, slot, tag, id) => {
     const lifted = lift && lift.slot === slot && lift.day === day;
-    const dis = state.offline ? 'disabled' : '';
     return `
       <button type="button" class="slot slot--${slot} ${lifted ? 'is-lifted' : ''}"
-              data-action="lift" data-day="${day}" data-slot="${slot}" ${dis}>
+              data-action="lift" data-day="${day}" data-slot="${slot}">
         <span class="tag">${tag}</span><span class="meal">${esc(mealName(id))}</span>
       </button>`;
   };
@@ -894,7 +866,6 @@ function viewWeek() {
 
 function viewBudget() {
   const w = state.week;
-  const dis = state.offline ? 'disabled' : '';
   const manual = w.groceries.filter((g) => !g.stapleId);
   return `
     <div class="screen">
@@ -904,7 +875,7 @@ function viewBudget() {
         <div class="budget-amount">
           <span class="cur">KSh</span>
           <input id="budget-input" type="number" inputmode="decimal" min="0" step="any"
-                 placeholder="0" value="${w.budget ?? ''}" data-input="budget" ${dis}>
+                 placeholder="0" value="${w.budget ?? ''}" data-input="budget">
         </div>
       </div>
 
@@ -914,33 +885,33 @@ function viewBudget() {
         return `
           <div class="g-row">
             <label class="tick">
-              <input type="checkbox" data-change="staple" data-id="${s.id}" ${row ? 'checked' : ''} ${dis}>
+              <input type="checkbox" data-change="staple" data-id="${s.id}" ${row ? 'checked' : ''}>
               <span class="box">✓</span>
             </label>
             <span class="g-name">${esc(s.name)}${s.unit ? `<span class="g-unit">${esc(s.unit)}</span>` : ''}</span>
             <input class="g-price" type="number" inputmode="decimal" min="0" step="any" placeholder="—"
                    value="${row?.price ?? ''}" data-input="price" data-row="${row?.id ?? ''}"
-                   ${row && !state.offline ? '' : 'disabled'}>
+                   ${row ? '' : 'disabled'}>
           </div>`;
       }).join('')}
 
       <p class="list-title">Off the list</p>
       ${manual.map((g) => `
         <div class="g-row">
-          <button type="button" class="g-remove" data-action="remove-item" data-row="${g.id}" ${dis} aria-label="Remove ${esc(g.name)}">×</button>
+          <button type="button" class="g-remove" data-action="remove-item" data-row="${g.id}" aria-label="Remove ${esc(g.name)}">×</button>
           <span class="g-name">${esc(g.name)}</span>
           <input class="g-price" type="number" inputmode="decimal" min="0" step="any" placeholder="—"
-                 value="${g.price ?? ''}" data-input="price" data-row="${g.id}" ${dis}>
+                 value="${g.price ?? ''}" data-input="price" data-row="${g.id}">
         </div>`).join('')}
       <form id="form-additem" class="add-item">
-        <input type="text" name="name" placeholder="Add an item" maxlength="80" autocomplete="off" ${dis}>
-        <input type="number" name="price" inputmode="decimal" min="0" step="any" placeholder="KSh" ${dis}>
-        <button type="submit" ${dis}>Add</button>
+        <input type="text" name="name" placeholder="Add an item" maxlength="80" autocomplete="off">
+        <input type="number" name="price" inputmode="decimal" min="0" step="any" placeholder="KSh">
+        <button type="submit">Add</button>
       </form>
 
       <label class="fruits-row">
         <span class="tick">
-          <input type="checkbox" data-change="fruits" ${w.use_remainder ? 'checked' : ''} ${dis}>
+          <input type="checkbox" data-change="fruits" ${w.use_remainder ? 'checked' : ''}>
           <span class="box">✓</span>
         </span>
         <span class="g-name">Fruits — whatever's left</span>
@@ -1036,7 +1007,7 @@ function render() {
     case 'error':       app.innerHTML = viewError(); return;
   }
   const screens = { pick: viewPick, week: viewWeek, budget: viewBudget, summary: viewSummary };
-  app.innerHTML = viewHeader() + viewOfflineBanner() + screens[state.route]() + viewTabbar();
+  app.innerHTML = viewHeader() + viewSaveErrorBanner() + screens[state.route]() + viewTabbar();
 }
 
 /* ---------- surgical updates (keep focus while typing) ---------- */
@@ -1071,7 +1042,7 @@ function animateMoney(el, to) {
 }
 
 /* ================================================================
-   10. ACTIONS & EVENTS
+   9. ACTIONS & EVENTS
    ================================================================ */
 const actions = {
   'pick-tab': (el) => {
@@ -1080,7 +1051,6 @@ const actions = {
   },
 
   'toggle-pick': (el) => {
-    if (state.offline) return;
     const id = el.dataset.id;
     const list = state.week.picks[state.pickTab];
     const at = list.indexOf(id);
@@ -1098,7 +1068,6 @@ const actions = {
   },
 
   'open-add': () => {
-    if (state.offline) return;
     state.addOpen = true;
     state.errorMsg = '';
     render();
@@ -1128,6 +1097,7 @@ const actions = {
   },
 
   'retry-sync': () => { resync(); },
+  'retry-save': () => { flushSave(); },
 };
 
 document.addEventListener('click', (e) => {
@@ -1183,15 +1153,8 @@ document.addEventListener('change', (e) => {
     const row = state.week.groceries.find((g) => g.id === el.dataset.row);
     if (!row) return;
     row.checked = el.checked;
+    scheduleSave();
     $('#shop-' + row.id)?.classList.toggle('is-checked', el.checked);
-    if (state.offline) {
-      queueTick(groceryKey(row), row.checked);
-      // preserve the dirty flag — a bare writeCache() here would clear it and
-      // lose the unsaved edits a failed save left behind
-      writeCache(readCache()?.dirty ?? false);
-    } else {
-      scheduleSave();
-    }
   }
 });
 
@@ -1226,7 +1189,6 @@ document.addEventListener('submit', async (e) => {
       state.meals.push(meal);
       state.addOpen = false;
       state.errorMsg = '';
-      writeCache();
     } catch (err) {
       state.errorMsg = `Couldn't save: ${err.message ?? 'no connection'}`;
     }
@@ -1262,18 +1224,17 @@ window.addEventListener('hashchange', () => {
   if (state.phase === 'ready') render();
 });
 
-window.addEventListener('online', () => { if (state.offline) resync(); });
+window.addEventListener('online', () => { if (state.saveStatus === 'error') flushSave(); });
 
-// A request fired during unload is routinely killed by the browser. Instead of
-// pretending it saved, stamp the cache dirty so the next boot pushes this copy.
-const persistOnLeave = () => {
-  if (state.phase === 'ready' && (saveTimer || state.saveStatus === 'saving')) writeCache(true);
-};
-window.addEventListener('pagehide', persistOnLeave);
-window.addEventListener('beforeunload', persistOnLeave);
+// Flush a pending debounce as soon as the tab is backgrounded — the page is
+// still alive then, so the request usually completes; waiting for unload
+// would hand the browser a request it is free to kill.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden' && saveTimer) flushSave();
+});
 
 /* ================================================================
-   11. BOOT
+   10. BOOT
    ================================================================ */
 let initInFlight = false;
 
@@ -1283,11 +1244,6 @@ async function initData() {
   if (initInFlight) return;
   initInFlight = true;
   try {
-    // a dirty cache holds edits a failed or interrupted save never delivered —
-    // push them first (last-write-wins, per the plan's single-user contract)
-    const cache = readCache();
-    if (cache?.dirty && cache.week) await db.saveWeek(cache.week);
-
     let { meals, staples } = await db.loadLibrary();
     if (meals.length === 0) meals = await db.seedMeals(state.session.user.id);
     if (staples.length === 0) staples = await db.seedStaples(state.session.user.id);
@@ -1296,50 +1252,25 @@ async function initData() {
     state.meals = meals;
     state.staples = staples;
     state.week = week;
-    state.offline = false;
     state.saveStatus = 'saved';
     state.phase = 'ready';
     state.route = currentRoute();
-
-    const ticks = readTicks();
-    if (ticks.length) {
-      applyTicks(week, ticks);
-      await db.saveWeek(week);
-      clearTicks();
-    }
-    writeCache();
   } catch (err) {
-    if (!fallbackToCache()) {
-      state.phase = 'error';
-      state.errorMsg = err?.message
-        ? `Something went wrong talking to Supabase: ${err.message}`
-        : 'No connection, and nothing saved on this device yet.';
-    }
+    state.phase = 'error';
+    state.errorMsg = err?.message
+      ? `Something went wrong talking to Supabase: ${err.message}`
+      : 'Could not reach Supabase — check your connection and try again.';
   } finally {
     initInFlight = false;
   }
   render();
 }
 
-function fallbackToCache() {
-  const cache = readCache();
-  if (!cache?.week) return false;
-  state.meals = cache.meals;
-  state.staples = cache.staples;
-  state.week = cache.week;
-  applyTicks(state.week, readTicks());
-  state.offline = true;
-  state.saveStatus = 'offline';
-  state.phase = 'ready';
-  state.route = currentRoute();
-  return true;
-}
-
 async function resync() {
   // db.client is null when the CDN import itself failed — retrying the data
   // layer can never succeed then; re-run the boot path instead
   if (!db.client) return main();
-  await initData(); // handles the dirty-cache push and offline fallback itself
+  await initData();
 }
 
 async function boot(client) {
@@ -1363,28 +1294,36 @@ async function boot(client) {
   }
 }
 
+let bootInFlight = false;
+
 async function main() {
-  render(); // loading splash
-  const configured = CONFIG.SUPABASE_URL.startsWith('https://') && !CONFIG.SUPABASE_ANON_KEY.startsWith('PASTE');
-  if (!configured) {
-    state.phase = 'config';
-    render();
-    return;
-  }
-  let createClient;
+  // repeated Retry taps (or Retry racing an 'online' event) must not stack
+  // CDN imports, clients, or duplicate auth listeners
+  if (bootInFlight) return;
+  bootInFlight = true;
   try {
-    ({ createClient } = await import(SUPABASE_CDN));
-  } catch {
-    if (!fallbackToCache()) {
-      state.phase = 'error';
-      state.errorMsg = 'No connection, and nothing saved on this device yet.';
+    render(); // loading splash
+    const configured = CONFIG.SUPABASE_URL.startsWith('https://') && !CONFIG.SUPABASE_ANON_KEY.startsWith('PASTE');
+    if (!configured) {
+      state.phase = 'config';
+      render();
+      return;
     }
-    render();
-    return;
+    let createClient;
+    try {
+      ({ createClient } = await import(SUPABASE_CDN));
+    } catch {
+      state.phase = 'error';
+      state.errorMsg = 'Could not load the app libraries — check your connection and try again.';
+      render();
+      return;
+    }
+    await boot(createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_ANON_KEY, {
+      auth: { persistSession: true, detectSessionInUrl: true },
+    }));
+  } finally {
+    bootInFlight = false;
   }
-  boot(createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_ANON_KEY, {
-    auth: { persistSession: true, detectSessionInUrl: true },
-  }));
 }
 
 // Debug/test seam: lets a fake client drive the app without touching Supabase.

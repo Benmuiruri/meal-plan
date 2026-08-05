@@ -66,9 +66,7 @@ Worth being blunt about this before you commit, because it is the one decision i
 - **Setup before first use.** Roughly 15 minutes: create the project, run one SQL script, paste two values into the file.
 - **A project that can go idle.** Supabase pauses free projects after a week of no requests. Weekly use keeps it awake; a month away means unpausing from the dashboard first.
 
-**The mitigation, built into Phase 1.** Every successful load writes a copy of the current week to browser storage. If the app opens without a connection it renders that copy read-only, with a plain banner: *"Offline — showing last saved copy. Changes won't save."* You can always read your list in the market. You just can't tick things off until you're back on data.
-
-That's a deliberate compromise. Full offline editing means conflict resolution — two devices, two versions of Tuesday — and that is a much larger build than everything else in this plan put together. Not worth it for one person planning one week.
+**Decision (2026-08-05): accepted without mitigation.** Revision 2 shipped an offline fallback here — a cached copy rendered read-only, plus a queued check-off replay. In practice the app is only ever used online, so the fallback and its complexity (dirty flags, replay queues, cache repair) were removed. What remains is honest failure handling: a save that fails shows **Not saved** with a Retry that resends the same data, and edits stay in memory until they get through.
 
 ---
 
@@ -174,7 +172,7 @@ Written on first sign-in, all editable, none permanent.
 ## 9. Build phases
 
 **Phase 1 — usable end to end.**
-Supabase schema, magic link sign-in, seeding, offline read-only fallback, design tokens, nav, Pick, Week with swapping, Budget, Summary. Images by pasted URL. You can plan a real week and deploy the same day.
+Supabase schema, magic link sign-in, seeding, save-failure handling, design tokens, nav, Pick, Week with swapping, Budget, Summary. Images by pasted URL. You can plan a real week and deploy the same day.
 
 **Phase 2 — the rest of the promise.**
 Photo upload to Storage, staple price memory, save to history, History screen.
@@ -200,7 +198,7 @@ The sequence matters — magic links need to know your live URL, so the app gets
 
 ## 11. Limits to know now
 
-- **No network, no editing.** You can read the last-loaded week offline; you can't change it. Section 4 explains why.
+- **No network, no app.** Online-only by decision — a failed save shows *Not saved* and retries; there is no offline copy. Section 4 has the history.
 - **Free tier pauses after a week idle.** Weekly use avoids this. A long break means unpausing from the dashboard.
 - **No ingredient auto-suggestion.** Choosing seven mains tells the grocery screen nothing — you still tick and type. Your call, and it keeps the app honest, but it's the one place work isn't removed.
 - **Magic links need a working inbox.** Supabase's free email sending is rate-limited and occasionally slow. If it becomes annoying, the fix is pointing Supabase at a free Resend account, about 10 minutes.
@@ -212,4 +210,4 @@ The sequence matters — magic links need to know your live URL, so the app gets
 1. Week starts **Monday**.
 2. Breakfasts do **not** repeat within a week — seven distinct picks, tap-to-select stays as designed.
 3. Currency — **`KSh 1,200`** on totals and the budget figure; plain `1,200` on individual line items.
-4. Offline check-offs — **allowed**. Ticking items on Summary works offline: ticks queue in browser storage and replay on reconnect. Everything else stays read-only offline. This amends the "no editing offline" line in sections 4 and 11 — a tick is a one-way flag, so it merges without the conflict-resolution cost that ruled out full offline editing.
+4. Offline support — **removed entirely**, superseding the offline-ticks decision made earlier the same day. The app is used online only; section 4's market-connectivity concern was judged overstated in practice. Failed saves surface a *Not saved* banner with a Retry instead.

@@ -17,12 +17,12 @@ assert.ok(start > 0 && dataLayerBanner > start, 'section markers found in index.
 const src = html.slice(start, dataLayerBanner) + `
 export { DAY_KEYS, PICK_TARGET, parseMoney, currentMonday, picksComplete,
          reconcileDays, swapSlots, lunchFor, computeTotals, budgetTone,
-         fruitsAmount, groceryKey, applyTicks };`;
+         fruitsAmount };`;
 
 const {
   DAY_KEYS, PICK_TARGET, parseMoney, currentMonday, picksComplete,
   reconcileDays, swapSlots, lunchFor, computeTotals, budgetTone,
-  fruitsAmount, groceryKey, applyTicks,
+  fruitsAmount,
 } = await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(src));
 
 const week = (over = {}) => ({
@@ -117,22 +117,6 @@ test('fruitsAmount claims the remainder but never goes negative', () => {
   assert.equal(fruitsAmount({ remaining: 250 }), 250);
   assert.equal(fruitsAmount({ remaining: -80 }), 0);
   assert.equal(fruitsAmount({ remaining: null }), null);
-});
-
-test('groceryKey prefers stapleId, falls back to case-insensitive name', () => {
-  assert.equal(groceryKey({ stapleId: 's1', name: 'Eggs' }), 's1');
-  assert.equal(groceryKey({ stapleId: null, name: 'Cooking Oil' }), 'name:cooking oil');
-});
-
-test('applyTicks sets checked by key and ignores unknown keys', () => {
-  const w = week({ groceries: [
-    { stapleId: 's1', name: 'Eggs', checked: false },
-    { stapleId: null, name: 'Oil', checked: true },
-  ] });
-  applyTicks(w, [{ key: 's1', checked: true }, { key: 'name:gone', checked: true }]);
-  assert.equal(w.groceries[0].checked, true);
-  assert.equal(w.groceries[1].checked, true);
-  assert.equal(w.groceries.length, 2);
 });
 
 test('PICK_TARGET is 7', () => assert.equal(PICK_TARGET, 7));
