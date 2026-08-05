@@ -18,7 +18,6 @@ create table staples (
   id         uuid primary key default gen_random_uuid(),
   user_id    uuid not null default auth.uid() references auth.users(id) on delete cascade,
   name       text not null,
-  unit       text,
   last_price numeric(10,2),
   sort_order integer not null default 0
 );
@@ -33,7 +32,6 @@ create table weeks (
   picks         jsonb not null default '{"mains":[],"breakfasts":[]}',
   days          jsonb not null default '{}',
   groceries     jsonb not null default '[]',
-  use_remainder boolean not null default false,
   updated_at    timestamptz not null default now(),
   unique (user_id, week_start)
 );

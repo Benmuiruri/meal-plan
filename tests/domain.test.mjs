@@ -84,6 +84,14 @@ test('swapSlots trades one slot between two days and nothing else', () => {
   assert.equal(days.mon.dinner, 'm1');         // input not mutated
 });
 
+test('swapSlots leaves typed lunch overrides on their days', () => {
+  const days = reconcileDays({ mains: ['m1', 'm2', 'm3', 'm4', 'm5', 'm6', 'm7'], breakfasts: [] }, {});
+  days.tue.lunch = 'Samosas';
+  const out = swapSlots(days, 'dinner', 'mon', 'tue');
+  assert.equal(out.tue.lunch, 'Samosas');      // the override belongs to the day, not the dinner
+  assert.equal(out.mon.lunch, undefined);      // and never migrates with it
+});
+
 test('lunch defaults to the previous day\'s dinner; Monday has none', () => {
   const days = { mon: { dinner: 'm1' }, tue: { dinner: 'm2' } };
   assert.equal(lunchFor(days, 'mon'), null);
