@@ -26,7 +26,7 @@ The app keeps that exact rhythm. It removes the retyping, the jumping between no
 | History | Read-only look-back at past weeks |
 | Data | **Supabase from day one.** Same weeks on every device. |
 | Sign-in | One shared household account, email + password, once per device |
-| Hosting | Netlify, static |
+| Hosting | GitHub Pages, static |
 | Budget | Never blocks. Goes negative, colour warns. |
 | Theme | Bright, menu-board |
 | Swapping | Tap two dinners to trade days. Monday lunch implicit. |
@@ -45,7 +45,7 @@ The Supabase client loads from CDN as an ES module:
 </script>
 ```
 
-Why still one file: the app is four screens and about a dozen interactive pieces. A build step would double your deployment friction and buy nothing. One file means Netlify accepts it directly, and changing a default price later is a text edit rather than a rebuild.
+Why still one file: the app is four screens and about a dozen interactive pieces. A build step would double your deployment friction and buy nothing. One file means GitHub Pages serves it as-is, and changing a default price later is a text edit rather than a rebuild.
 
 Fonts come from Google Fonts over CDN. Everything else is hand-written.
 
@@ -189,8 +189,8 @@ The sequence matters — auth emails (password resets) need to know your live UR
 1. **Create the Supabase project** at supabase.com. Free tier, no card. Note the region closest to you.
 2. **Run `schema.sql`** in the SQL Editor. One paste, one run.
 3. **Copy two values** from Project Settings → API: the project URL and the `anon` public key. Paste them into the `CONFIG` block at the top of `index.html`. Both are safe to have in a public file — row-level security is what protects your data, not key secrecy.
-4. **Deploy to Netlify.** Either drag the file onto `netlify.com/drop`, or put it in a GitHub repo and connect Netlify to it. The repo route means editing the file on github.com redeploys automatically, including from your phone.
-5. **Point auth at the live URL.** Supabase → Authentication → URL Configuration: set Site URL to your Netlify address. Sign-in itself doesn't need it, but password-reset links land on localhost without it. While there, consider turning **off** "Allow new users to sign up" — the household account already exists and nothing else should self-register.
+4. **Deploy to GitHub Pages.** Repo → Settings → Pages → "Deploy from a branch" → `main`, `/ (root)`. Every push redeploys automatically — including edits made on github.com from your phone. The site lands at `https://benmuiruri.github.io/meal-plan/`. (The app uses hash routing, so Pages' lack of server-side redirects costs nothing.)
+5. **Point auth at the live URL.** Supabase → Authentication → URL Configuration: set Site URL to the Pages address. Sign-in itself doesn't need it, but password-reset links land on localhost without it. While there, consider turning **off** "Allow new users to sign up" — the household account already exists and nothing else should self-register.
 6. **Sign in and seed.** First sign-in writes your library and staples.
 7. **Add to Home Screen** from your browser menu. After Phase 3 it opens without browser chrome.
 
