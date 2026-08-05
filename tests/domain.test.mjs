@@ -1,0 +1,138 @@
+// Zero-dependency tests for the pure domain layer inside index.html.
+// Run with: node --test tests/domain.test.mjs
+//
+// The app is deliberately a single file with no build step, so the domain
+// section (constants + utilities + domain functions, sections 2–4) is sliced
+// out of index.html and imported as an ES module via a data: URL.
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+
+const html = await readFile(new URL('../index.html', import.meta.url), 'utf8');
+const start = html.indexOf('const DAY_KEYS');
+const dataLayerBanner = html.lastIndexOf('/* =', html.indexOf('5. DATA LAYER'));
+assert.ok(start > 0 && dataLayerBanner > start, 'section markers found in index.html');
+
+const src = html.slice(start, dataLayerBanner) + `
+export { DAY_KEYS, PICK_TARGET, parseMoney, currentMonday, picksComplete,
+         reconcileDays, swapSlots, lunchFor, computeTotals, budgetTone,
+         fruitsAmount, groceryKey, applyTicks };`;
+
+const {
+  DAY_KEYS, PICK_TARGET, parseMoney, currentMonday, picksComplete,
+  reconcileDays, swapSlots, lunchFor, computeTotals, budgetTone,
+  fruitsAmount, groceryKey, applyTicks,
+} = await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(src));
+
+const week = (over = {}) => ({
+  budget: null, picks: { mains: [], breakfasts: [] }, days: {},
+  groceries: [], use_remainder: false, ...over,
+});
+
+test('parseMoney: empty clears, invalid and negative are rejected', () => {
+  assert.equal(parseMoney(''), null);
+  assert.equal(parseMoney('   '), null);
+  assert.equal(parseMoney('50'), 50);
+  assert.equal(parseMoney('12.50'), 12.5);
+  assert.equal(parseMoney('-5'), undefined);
+  assert.equal(parseMoney('abc'), undefined);
+  assert.equal(parseMoney('1e3'), 1000);
+});
+
+test('currentMonday returns an ISO date that is a Monday', () => {
+  const iso = currentMonday();
+  assert.match(iso, /^\d{4}-\d{2}-\d{2}$/);
+  assert.equal(new Date(iso).getUTCDay(), 1);
+});
+
+test('picksComplete requires exactly 7 of each', () => {
+  const ids = (n, p) => Array.from({ length: n }, (_, i) => p + i);
+  assert.equal(picksComplete(week({ picks: { mains: ids(7, 'm'), breakfasts: ids(7, 'b') } })), true);
+  assert.equal(picksComplete(week({ picks: { mains: ids(6, 'm'), breakfasts: ids(7, 'b') } })), false);
+});
+
+test('reconcileDays fills empty days from picks in order', () => {
+  const picks = { mains: ['m1', 'm2', 'm3', 'm4', 'm5', 'm6', 'm7'], breakfasts: ['b1', 'b2', 'b3', 'b4', 'b5', 'b6', 'b7'] };
+  const days = reconcileDays(picks, {});
+  assert.equal(days.mon.dinner, 'm1');
+  assert.equal(days.sun.dinner, 'm7');
+  assert.equal(days.mon.breakfast, 'b1');
+  assert.equal(DAY_KEYS.every((k) => days[k].dinner && days[k].breakfast), true);
+});
+
+test('reconcileDays keeps existing assignments and drops unpicked meals', () => {
+  const picks = { mains: ['m1', 'm2'], breakfasts: [] };
+  const existing = { mon: { dinner: 'm2', breakfast: null }, tue: { dinner: 'gone', breakfast: null } };
+  const days = reconcileDays(picks, existing);
+  assert.equal(days.mon.dinner, 'm2');   // kept in place
+  assert.equal(days.tue.dinner, 'm1');   // 'gone' dropped, backfilled in pick order
+});
+
+test('reconcileDays deduplicates a meal assigned twice', () => {
+  const picks = { mains: ['m1', 'm2'], breakfasts: [] };
+  const doubled = { mon: { dinner: 'm1', breakfast: null }, tue: { dinner: 'm1', breakfast: null } };
+  const days = reconcileDays(picks, doubled);
+  assert.equal(days.mon.dinner, 'm1');
+  assert.equal(days.tue.dinner, 'm2');
+});
+
+test('swapSlots trades one slot between two days and nothing else', () => {
+  const days = reconcileDays({ mains: ['m1', 'm2', 'm3', 'm4', 'm5', 'm6', 'm7'], breakfasts: ['b1', 'b2', 'b3', 'b4', 'b5', 'b6', 'b7'] }, {});
+  const out = swapSlots(days, 'dinner', 'mon', 'wed');
+  assert.equal(out.mon.dinner, 'm3');
+  assert.equal(out.wed.dinner, 'm1');
+  assert.equal(out.mon.breakfast, 'b1');       // breakfasts untouched
+  assert.equal(days.mon.dinner, 'm1');         // input not mutated
+});
+
+test('lunch is the previous day\'s dinner; Monday has none', () => {
+  const days = { mon: { dinner: 'm1' }, tue: { dinner: 'm2' } };
+  assert.equal(lunchFor(days, 'mon'), null);
+  assert.equal(lunchFor(days, 'tue'), 'm1');
+  assert.equal(lunchFor(days, 'wed'), 'm2');
+});
+
+test('computeTotals ignores null prices and rounds to cents', () => {
+  const w = week({ budget: 1000, groceries: [{ price: 0.1 }, { price: 0.2 }, { price: null }] });
+  const t = computeTotals(w);
+  assert.equal(t.total, 0.3);
+  assert.equal(t.remaining, 999.7);
+});
+
+test('computeTotals with no budget yields null remaining', () => {
+  assert.equal(computeTotals(week({ groceries: [{ price: 50 }] })).remaining, null);
+});
+
+test('budgetTone: green at exactly 10% left, amber below, red past zero', () => {
+  const tone = (budget, total) => budgetTone(computeTotals(week({ budget, groceries: [{ price: total }] })));
+  assert.equal(tone(300, 200), 'green');
+  assert.equal(tone(300, 270), 'green');   // remaining 30 = exactly 10%
+  assert.equal(tone(300, 271), 'amber');
+  assert.equal(tone(300, 301), 'red');
+  assert.equal(budgetTone(computeTotals(week())), 'plain');
+});
+
+test('fruitsAmount claims the remainder but never goes negative', () => {
+  assert.equal(fruitsAmount({ remaining: 250 }), 250);
+  assert.equal(fruitsAmount({ remaining: -80 }), 0);
+  assert.equal(fruitsAmount({ remaining: null }), null);
+});
+
+test('groceryKey prefers stapleId, falls back to case-insensitive name', () => {
+  assert.equal(groceryKey({ stapleId: 's1', name: 'Eggs' }), 's1');
+  assert.equal(groceryKey({ stapleId: null, name: 'Cooking Oil' }), 'name:cooking oil');
+});
+
+test('applyTicks sets checked by key and ignores unknown keys', () => {
+  const w = week({ groceries: [
+    { stapleId: 's1', name: 'Eggs', checked: false },
+    { stapleId: null, name: 'Oil', checked: true },
+  ] });
+  applyTicks(w, [{ key: 's1', checked: true }, { key: 'name:gone', checked: true }]);
+  assert.equal(w.groceries[0].checked, true);
+  assert.equal(w.groceries[1].checked, true);
+  assert.equal(w.groceries.length, 2);
+});
+
+test('PICK_TARGET is 7', () => assert.equal(PICK_TARGET, 7));

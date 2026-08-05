@@ -664,11 +664,16 @@ function scheduleSave() {
 
 async function flushSave() {
   clearTimeout(saveTimer);
+  saveTimer = null;
   if (!state.week || state.offline) return;
   try {
     await db.saveWeek(state.week);
-    setSaveStatus('saved');
-    writeCache();
+    // an edit made while this request was in flight schedules a new timer —
+    // only a flush with no pending timer may declare the state saved
+    if (!saveTimer) {
+      setSaveStatus('saved');
+      writeCache();
+    }
   } catch {
     goOffline(true);
   }
@@ -1181,7 +1186,9 @@ document.addEventListener('change', (e) => {
     $('#shop-' + row.id)?.classList.toggle('is-checked', el.checked);
     if (state.offline) {
       queueTick(groceryKey(row), row.checked);
-      writeCache();
+      // preserve the dirty flag — a bare writeCache() here would clear it and
+      // lose the unsaved edits a failed save left behind
+      writeCache(readCache()?.dirty ?? false);
     } else {
       scheduleSave();
     }
@@ -1256,9 +1263,14 @@ window.addEventListener('hashchange', () => {
 });
 
 window.addEventListener('online', () => { if (state.offline) resync(); });
-window.addEventListener('beforeunload', () => {
-  if (state.saveStatus === 'saving') flushSave();
-});
+
+// A request fired during unload is routinely killed by the browser. Instead of
+// pretending it saved, stamp the cache dirty so the next boot pushes this copy.
+const persistOnLeave = () => {
+  if (state.phase === 'ready' && (saveTimer || state.saveStatus === 'saving')) writeCache(true);
+};
+window.addEventListener('pagehide', persistOnLeave);
+window.addEventListener('beforeunload', persistOnLeave);
 
 /* ================================================================
    11. BOOT
@@ -1271,6 +1283,11 @@ async function initData() {
   if (initInFlight) return;
   initInFlight = true;
   try {
+    // a dirty cache holds edits a failed or interrupted save never delivered —
+    // push them first (last-write-wins, per the plan's single-user contract)
+    const cache = readCache();
+    if (cache?.dirty && cache.week) await db.saveWeek(cache.week);
+
     let { meals, staples } = await db.loadLibrary();
     if (meals.length === 0) meals = await db.seedMeals(state.session.user.id);
     if (staples.length === 0) staples = await db.seedStaples(state.session.user.id);
@@ -1319,16 +1336,10 @@ function fallbackToCache() {
 }
 
 async function resync() {
-  const cache = readCache();
-  try {
-    if (cache?.dirty) {
-      await db.saveWeek(cache.week);
-      writeCache();
-    }
-    await initData();
-  } catch {
-    render(); // still offline; stay on the cached copy
-  }
+  // db.client is null when the CDN import itself failed — retrying the data
+  // layer can never succeed then; re-run the boot path instead
+  if (!db.client) return main();
+  await initData(); // handles the dirty-cache push and offline fallback itself
 }
 
 async function boot(client) {

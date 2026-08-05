@@ -74,57 +74,9 @@ That's a deliberate compromise. Full offline editing means conflict resolution �
 
 ## 5. Data model
 
-Three tables. Every row is scoped to your user id, enforced by row-level security in the database rather than trusted to the app.
+Three tables — `meals`, `staples`, `weeks`. Every row is scoped to your user id, enforced by row-level security in the database rather than trusted to the app.
 
-```sql
--- Meals and breakfasts: your library
-create table meals (
-  id         uuid primary key default gen_random_uuid(),
-  user_id    uuid not null references auth.users(id) on delete cascade,
-  name       text not null,
-  kind       text not null check (kind in ('main', 'breakfast')),
-  image_url  text,
-  tint       text,
-  archived   boolean not null default false,
-  created_at timestamptz not null default now()
-);
-
--- Grocery staples with remembered prices
-create table staples (
-  id         uuid primary key default gen_random_uuid(),
-  user_id    uuid not null references auth.users(id) on delete cascade,
-  name       text not null,
-  unit       text,
-  last_price numeric(10,2),
-  sort_order integer not null default 0
-);
-
--- One row per week, draft or saved
-create table weeks (
-  id            uuid primary key default gen_random_uuid(),
-  user_id       uuid not null references auth.users(id) on delete cascade,
-  week_start    date not null,
-  budget        numeric(10,2),
-  status        text not null default 'draft' check (status in ('draft', 'saved')),
-  picks         jsonb not null default '{"mains":[],"breakfasts":[]}',
-  days          jsonb not null default '{}',
-  groceries     jsonb not null default '[]',
-  use_remainder boolean not null default false,
-  updated_at    timestamptz not null default now(),
-  unique (user_id, week_start)
-);
-
-alter table meals   enable row level security;
-alter table staples enable row level security;
-alter table weeks   enable row level security;
-
-create policy "own meals"   on meals   for all
-  using (auth.uid() = user_id) with check (auth.uid() = user_id);
-create policy "own staples" on staples for all
-  using (auth.uid() = user_id) with check (auth.uid() = user_id);
-create policy "own weeks"   on weeks   for all
-  using (auth.uid() = user_id) with check (auth.uid() = user_id);
-```
+The DDL lives in **`schema.sql`** at the repo root — that file is the single source of truth, and it's what you run in the SQL Editor. Beyond the three tables it carries the production details: RLS policies scoped `to authenticated` using the cached `(select auth.uid())` form, `user_id` defaults, indexes on the policy columns, and a trigger that maintains `weeks.updated_at`. (An earlier revision inlined the SQL here; it drifted from the real file, so the copy was removed.)
 
 ### Shapes inside the JSON columns
 
@@ -237,7 +189,7 @@ Library editing and archiving, delete a saved week, keyboard focus states, web m
 The sequence matters — magic links need to know your live URL, so the app gets deployed before auth is finished.
 
 1. **Create the Supabase project** at supabase.com. Free tier, no card. Note the region closest to you.
-2. **Run the SQL** from section 5 in the SQL Editor. One paste, one run.
+2. **Run `schema.sql`** in the SQL Editor. One paste, one run.
 3. **Copy two values** from Project Settings → API: the project URL and the `anon` public key. Paste them into the `CONFIG` block at the top of `index.html`. Both are safe to have in a public file — row-level security is what protects your data, not key secrecy.
 4. **Deploy to Netlify.** Either drag the file onto `netlify.com/drop`, or put it in a GitHub repo and connect Netlify to it. The repo route means editing the file on github.com redeploys automatically, including from your phone.
 5. **Point auth at the live URL.** Supabase → Authentication → URL Configuration: set Site URL to your Netlify address. Without this, magic links land on localhost and fail.
