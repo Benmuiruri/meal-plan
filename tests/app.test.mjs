@@ -139,6 +139,37 @@ test('banner follows every status transition: appears on failure, clears on the 
   assert.match(dom.banner.html, /transient/);  // connection failures offer Retry
   scheduleSave();                              // user resumes typing
   assert.equal(dom.banner, null, 'a resumed edit clears the stale banner immediately');
+  db.client = fakeWeeksClient();
+  await flushSave();                           // disarm the timer this test armed
+});
+
+test('a banner already showing refreshes when a retry escalates to a permanent failure', async () => {
+  db.client = fakeWeeksClient({ failWith: { message: 'network down' } });
+  await flushSave();
+  assert.match(dom.banner.html, /transient/);
+  db.client = fakeWeeksClient({ matchedRows: [] });
+  delete state.week.user_id;                   // row gone + week too stripped to restore
+  await flushSave();                           // the Retry-button path: no edit in between
+  assert.match(dom.banner.html, /permanent/, 'stale transient banner must be replaced');
+});
+
+test('the real banner template pairs permanent with Reload and transient with Retry', async () => {
+  const bannerSrc = html.slice(html.indexOf('function viewSaveErrorBanner'), html.indexOf('function viewTabbar'));
+  const mkBanner = async (permanent) => {
+    const mod = await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(
+      `const state = { saveStatus: 'error', saveErrorPermanent: ${permanent} };\n${bannerSrc}\nexport { viewSaveErrorBanner };`));
+    return mod.viewSaveErrorBanner();
+  };
+  const perm = await mkBanner(true);
+  assert.match(perm, /data-action="reload"/);
+  assert.match(perm, /will be lost/);          // Reload admits it discards unsaved edits
+  assert.doesNotMatch(perm, /data-action="retry-save"/);
+  const transient = await mkBanner(false);
+  assert.match(transient, /data-action="retry-save"/);
+  assert.doesNotMatch(transient, /data-action="reload"/);
+  // and both actions are wired in the real actions map
+  assert.match(html, /'retry-save': \(\) =>/);
+  assert.match(html, /'reload': \(\) =>/);
 });
 
 test('banner clears when a retry succeeds', async () => {

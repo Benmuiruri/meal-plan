@@ -683,12 +683,12 @@ async function flushSave() {
 
 // Surgical, state-driven banner management: a full render() here would
 // rebuild the inputs and yank focus mid-typing on the flaky-connection path.
+// Always rebuilt, never kept — a retry can escalate a transient failure to a
+// permanent one, and a stale banner would offer Retry for the unretryable.
 function updateSaveBanner() {
-  const existing = $('#save-banner');
+  $('#save-banner')?.remove();
   if (state.phase === 'ready' && state.saveStatus === 'error') {
-    if (!existing) $('.header')?.insertAdjacentHTML('afterend', viewSaveErrorBanner());
-  } else {
-    existing?.remove();
+    $('.header')?.insertAdjacentHTML('afterend', viewSaveErrorBanner());
   }
 }
 
@@ -732,7 +732,7 @@ function viewSaveErrorBanner() {
   return `
     <div class="banner" id="save-banner" role="status">
       <span>${permanent
-        ? "Something's wrong with this week's data and retrying can't fix it — reload the app."
+        ? "Something's wrong with this week's data and it can't be saved. Reloading starts fresh — unsaved changes will be lost."
         : "Couldn't save — check your connection. Your changes are still here; retry sends them again."}</span>
       ${permanent
         ? '<button data-action="reload" type="button">Reload</button>'
