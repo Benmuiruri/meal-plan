@@ -1,9 +1,5 @@
-// Zero-dependency tests for the pure domain layer inside index.html.
-// Run with: node --test tests/domain.test.mjs
-//
-// The app is deliberately a single file with no build step, so the domain
-// section (constants + utilities + domain functions, sections 2–4) is sliced
-// out of index.html and imported as an ES module via a data: URL.
+// Domain-layer tests: sections 2–4 of index.html sliced out and imported as
+// a data: URL module. Run with: node --test tests/domain.test.mjs
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -178,10 +174,8 @@ test('seed meals are well-formed: unique names, bucket-shaped image names', () =
   for (const m of all) {
     assert.ok(m.name?.trim(), 'every seed has a name');
     if (m.img !== undefined) {
-      // the object naming convention of the meal-images bucket — a space or
-      // uppercase here is a 404 that renders as the plain tinted tile. The
-      // suite can't reach the bucket to prove each object exists; that was
-      // verified live when the photos were loaded (2026-08-06).
+      // a space or uppercase here is a bucket 404; existence itself was
+      // verified live when the photos were loaded (2026-08-06)
       assert.match(m.img, /^[a-z0-9-]+\.jpg$/, `${m.name}: "${m.img}" is not a bucket-shaped object name`);
     }
   }

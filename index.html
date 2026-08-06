@@ -527,12 +527,8 @@ function currentRoute() {
 
 const reducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-// A phone photo is 3–5MB; the card needs ~30–50KB. Downscale to a pixel
-// budget — 0.12MP, the area of the plan's 400×300 card face — which bounds
-// file size and resolution together where an edge bound lets extreme aspect
-// ratios cheat one or the other. The byte and pixel caps refuse absurd
-// inputs honestly; the decode itself is the platform's memory to manage —
-// JS only learns the dimensions after it happens.
+// Downscale to a 0.12MP pixel budget (400×300-ish) before upload: bounds file
+// size AND resolution where an edge bound lets extreme aspect ratios cheat.
 const IMAGE_PIXEL_BUDGET = 400 * 300;
 async function resizeImage(file) {
   if (file.size > 20 * 1024 * 1024) {
@@ -564,9 +560,8 @@ function picksComplete(week) {
       && week.picks.breakfasts.length === PICK_TARGET;
 }
 
-// Keep day assignments consistent with picks: drop meals no longer picked,
-// deduplicate, then fill empty days from picks in order. Free-text lunch
-// overrides are the user's own words, not picks — they ride along untouched.
+// Drop unpicked meals, dedupe, backfill from picks in order. Lunch overrides
+// are the user's own words, not picks — they ride along untouched.
 function reconcileDays(picks, days) {
   const out = {};
   for (const k of DAY_KEYS) {
@@ -630,18 +625,12 @@ function nextDraftStart(savedStart, todayMonday) {
 /* ================================================================
    5. DATA LAYER — every Supabase call lives here
    ================================================================ */
-// The one spelling of the bucket's public URL shape. Seeding builds with it
-// and removeMealImage parses with it; supabase-js's getPublicUrl emits the
-// same shape (storage base + /object/public/<bucket>/<path>), and a test
-// pins that the parser and the builder stay in agreement.
+// The one spelling of the bucket's public URL shape — seeding builds with it,
+// removeMealImage parses with it, a test pins getPublicUrl agrees with both.
 const MEAL_IMAGES_PUBLIC = '/storage/v1/object/public/meal-images/';
 
-// Only code shapes PostgREST can emit prove the server answered — and
-// therefore that a failed insert definitely wrote nothing: PGRST*** or a
-// five-character SQLSTATE (23505, 42501…). postgrest-js forwards a transport
-// error's OWN code into the error it builds ('' for a bare TypeError, the
-// legacy 20 for an AbortError), so "truthy code" is NOT proof of a server
-// answer; the shape test is.
+// Only PostgREST-shaped codes (PGRST*** / 5-char SQLSTATE) prove the server
+// answered — postgrest-js forwards transport errors' own codes ('', or 20).
 const isServerRejection = (err) =>
   typeof err?.code === 'string' && /^(PGRST\d+|[0-9A-Z]{5})$/.test(err.code);
 
@@ -678,9 +667,8 @@ const db = {
     return data;
   },
 
-  // The active week is always the newest row: a draft is resumed no matter
-  // how stale (saving it is the user's ritual, not the calendar's), and a
-  // saved newest row means the next draft starts — see nextDraftStart.
+  // The newest row wins: a draft is resumed no matter how stale (saving is
+  // the user's ritual, not the calendar's); a saved one starts the next draft.
   async loadActiveWeek(userId, todayMonday) {
     const latest = await this.client.from('weeks').select('*')
       .order('week_start', { ascending: false }).limit(1).maybeSingle();
@@ -698,9 +686,8 @@ const db = {
       .update({ status: 'saved' }).eq('id', weekId).select('id');
     if (error) throw error;
     if (!data || data.length === 0) {
-      // a KNOWN outcome — PostgREST answered, zero rows matched, nothing
-      // flipped. Flagged so the caller treats it as retryable: the flush's
-      // self-heal upsert restores a vanished row, then the flip lands.
+      // known outcome: zero rows matched, nothing flipped — flagged retryable
+      // because a retry's flush self-heals the vanished row first
       const gone = new Error("this week's record vanished — retrying restores it");
       gone.weekRowGone = true;
       throw gone;
@@ -725,11 +712,8 @@ const db = {
       .update(payload).eq('id', week.id).select('id');
     if (error) throw error;
     if (data && data.length > 0) return;
-    // An update matching zero rows reports no error, but the row is gone
-    // (deleted elsewhere, reset project) — restore it rather than letting
-    // every retry fail forever. Conflict on the natural key, not the id:
-    // another device may have already recreated this week under a fresh id,
-    // and inserting a second (user_id, week_start) row would 23505 forever.
+    // zero rows matched = the row is gone — restore it. Conflict on the
+    // natural key: another device may have recreated the week under a new id.
     if (!week.user_id || !week.week_start || !week.status) {
       // a local, permanent condition — retrying can never fix it, so it must
       // not be dressed up as a connection problem
@@ -774,14 +758,10 @@ const db = {
   },
 };
 
-// "JWT issued at future": a freshly minted access token can look post-dated
-// to a Supabase node whose clock runs a beat behind the issuer's. Its code,
-// PGRST303, covers every JWT claims failure — expired tokens included — so
-// the message is the discriminator, not decoration. The rejected request
-// never executed, but earlier requests inside a multi-step method did, so
-// the retry re-running the whole method is safe only while every db method
-// stays idempotent (reads, same-payload updates, natural-key upserts) —
-// new methods must keep that property or opt out of the wrap below.
+// Supabase node clock skew can reject a fresh token as "issued at future";
+// the message is the discriminator (PGRST303 alone also covers expired).
+// Re-running the whole method is safe only while every db method stays
+// idempotent — new methods must keep that property or opt out of the wrap.
 const SKEW_RETRY_MS = 2000;
 async function withSkewRetry(run) {
   try {
@@ -840,14 +820,8 @@ const state = {
   saveErrorPermanent: false, // error subtype: permanent failures get Reload, not Retry
 };
 
-// A card photo that fails to load gets a volatile imageDead flag: re-renders
-// show the tinted tile instead of refiring the request. The flag ends one
-// of two ways: an online transition clears it deliberately (reviveDeadImages
-// below, wired to the online listener), and any initData meals reload drops
-// it incidentally with the rest of the old row objects. A failure while the
-// browser stayed "online" — timeout, gateway error — therefore keeps the
-// tile until reconnect or the next meals load. Accepted trade-off: broader
-// revival would re-fetch permanently dead URLs on every trigger.
+// Volatile flag: a failed card photo degrades to the tinted tile and stays
+// there until reconnect (reviveDeadImages) or the next meals reload.
 function markDeadImage(imgEl) {
   if (imgEl?.tagName !== 'IMG') return false;
   const card = imgEl.closest('.meal-card[data-id]');
@@ -886,9 +860,8 @@ async function flushSave() {
   clearTimeout(saveTimer);
   saveTimer = null;
   if (!state.week) return;
-  // Saves are strictly serialized: firing a second request while one is in
-  // flight lets the requests land out of order server-side, and lets the
-  // first completion stamp "Saved" while newer edits are still airborne.
+  // Strictly serialized: concurrent saves can land out of order server-side
+  // and stamp "Saved" while newer edits are still airborne.
   if (saveInFlight) {
     saveTimer = setTimeout(flushSave, 200);
     return;
@@ -904,18 +877,14 @@ async function flushSave() {
     setSaveStatus('error');
   } finally {
     saveInFlight = false;
-    // if edits queued behind this request while the tab went hidden, don't
-    // trust a throttled background timer — send them now, while the page is
-    // still alive to complete the request
+    // edits queued while hidden: don't trust a throttled background timer —
+    // send now, while the page is still alive to complete the request
     if (saveTimer && document.visibilityState === 'hidden') flushSave();
   }
 }
 
-// Surgical, state-driven banner management: a full render() here would
-// rebuild the inputs and yank focus mid-typing on the flaky-connection path.
-// Rebuilt only when the failure class changes — an escalation must replace
-// the stale Retry banner, but a repeat of the same failure keeps the element
-// (and the focus of whoever just pressed its Retry button) intact.
+// Surgical (a render() would yank focus mid-typing): rebuilt only when the
+// failure class changes, so a repeated failure keeps the Retry button intact.
 function updateSaveBanner() {
   const existing = $('#save-banner');
   const show = state.phase === 'ready' && state.saveStatus === 'error';
@@ -927,8 +896,7 @@ function updateSaveBanner() {
 
 function setSaveStatus(status) {
   state.saveStatus = status;
-  updateSaveBanner(); // banner visibility tracks every transition, so a
-                      // resumed edit clears "Couldn't save" immediately
+  updateSaveBanner(); // a resumed edit clears "Couldn't save" immediately
   const el = $('#save-state');
   if (el) {
     el.dataset.status = status;
@@ -937,24 +905,10 @@ function setSaveStatus(status) {
   }
 }
 
-// Freezing the week, as one guarded flow. The caller owns dialogs and
-// navigation; this owns the ordering and the failure outcomes:
-//   busy         — a save-week is already running (double-tap)
-//   dirty        — pending edits could not reach Supabase; freezing now
-//                  would make stale data the permanent record
-//   save-failed  — the flip provably did not land: a coded server
-//                  rejection, or the row vanished (weekRowGone). Retrying
-//                  is honest advice — a retry's flush self-heals a
-//                  vanished row, then the flip lands.
-//   save-unknown — transport failure only: the row may be frozen while
-//                  memory says draft. Only a resync can tell — the caller
-//                  must lock the UI into it, and loadActiveWeek then lands
-//                  on the truth whichever way the flip went.
-//   load-failed  — the week IS saved (state.week.status flips in memory at
-//                  once, so the self-heal upsert can never resurrect it as
-//                  a draft) but the next draft could not start — lock, not
-//                  shrug
-//   done         — state.week is the fresh draft
+// Freezing the week as one guarded flow; the caller owns dialogs/navigation.
+// Outcomes: busy | dirty (sync not clean) | save-failed (flip provably didn't
+// land, retryable) | save-unknown (transport: only a resync knows — lock the
+// UI into it) | load-failed (frozen, next draft failed — lock) | done.
 let saveWeekInFlight = false;
 const saveWeekBusy = () => saveWeekInFlight;
 async function performSaveWeek(todayMonday, waitCeilingMs = 15000) {
@@ -962,9 +916,8 @@ async function performSaveWeek(todayMonday, waitCeilingMs = 15000) {
   saveWeekInFlight = true;
   try {
     await flushSave();
-    // a flush requested while another was in flight re-queues on a timer —
-    // wait the pipeline out rather than misreading 'saving' as failure, but
-    // bounded: a hung request must exit as dirty, not latch the flow forever
+    // wait out a re-queued flush rather than misread 'saving' as failure —
+    // bounded, so a hung request exits as dirty instead of latching the flow
     const deadline = Date.now() + waitCeilingMs;
     while (state.saveStatus === 'saving' && Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 50));
@@ -1106,8 +1059,7 @@ function viewPick() {
       <div class="pick-grid">
         ${cards.map((m) => {
           const isPicked = picked.includes(m.id);
-          // imageDead → tinted name tile; the flag's lifetime is documented
-          // on markDeadImage
+          // imageDead → tinted name tile (see markDeadImage)
           const face = m.image_url && !m.imageDead
             ? `<img src="${esc(m.image_url)}" alt="" loading="lazy"><span class="shade"></span>`
             : '';
@@ -1488,21 +1440,18 @@ const actions = {
   'retry-save': () => { flushSave(); },
   'reload': () => { location.reload(); },
 
-  // performSaveWeek owns ordering and failure outcomes; this owns the
-  // dialogs and where each outcome lands.
   'save-week': async () => {
-    if (saveWeekBusy()) return; // belt — the loading gate below is braces
+    if (saveWeekBusy()) return;
     if (!confirm('Save this week and start the next?')) return;
-    // gate the whole UI for the duration: an edit typed mid-flow would arm
-    // a debounced save that fires into the just-frozen record
+    // gate the UI: an edit typed mid-flow would arm a debounced save that
+    // fires into the just-frozen record
     state.phase = 'loading';
     state.loadingMsg = 'Saving the week…';
     render();
     const { outcome, error } = await performSaveWeek(currentMonday());
     state.loadingMsg = '';
     if (outcome === 'save-unknown' || outcome === 'load-failed') {
-      // editing must stop — the error screen's Try again resyncs onto the
-      // truth: the fresh draft, or this week still a draft
+      // editing must stop — Try again resyncs onto the truth either way
       state.phase = 'error';
       state.errorMsg = outcome === 'save-unknown'
         ? "Couldn't confirm whether the week was saved. Tap Try again — the resync sorts it out either way."
@@ -1512,11 +1461,8 @@ const actions = {
     }
     state.phase = 'ready';
     if (outcome === 'done') {
-      // no reliance on hashchange: Back during the gate can leave the hash
-      // at #/pick already, and an equal assignment fires no event at all.
-      // replaceState, not pushState: no new history entry for a transition
-      // the user didn't navigate — whatever entry is current simply becomes
-      // the fresh draft's Pick.
+      // hashchange can't be trusted (an equal hash fires no event), and
+      // replaceState adds no history entry for a jump nobody navigated
       state.route = 'pick';
       state.historyDetail = null;
       history.replaceState(null, '', '#/pick');
@@ -1544,9 +1490,7 @@ document.addEventListener('click', (e) => {
   if (el) actions[el.dataset.action]?.(el);
 });
 
-// Error events don't bubble — capture phase is the only delegated way to
-// hear a card image fail. markDeadImage does the state work and is tested
-// directly; this line is only the wiring.
+// error events don't bubble — capture phase is the only delegated way in
 document.addEventListener('error', (e) => { markDeadImage(e.target); }, true);
 
 document.addEventListener('input', (e) => {
@@ -1641,12 +1585,8 @@ document.addEventListener('submit', async (e) => {
     } catch (err) {
       state.addName = name; // the file input can't be refilled, but the name can
       state.errorMsg = `Couldn't save: ${err.message ?? 'no connection'}`;
-      // Reclaim only on a server rejection: that proves the insert never
-      // landed AND the connection is alive. A network unknown keeps the
-      // object — the response may have been lost AFTER the row was written,
-      // and deleting would break a photo a live meal points at. Accepted
-      // trade-off: a rare ~40KB orphan nobody sweeps, logged for whoever
-      // ever wonders; at that size the free tier holds ~25,000 of them.
+      // reclaim only on a server rejection (insert provably never landed);
+      // a network unknown keeps the object — a live row may point at it
       if (image_url && isServerRejection(err)) {
         db.removeMealImage(image_url).catch((e) => console.warn('meal image orphaned:', image_url, e));
       } else if (image_url) {
@@ -1683,14 +1623,11 @@ window.addEventListener('hashchange', () => {
 
 window.addEventListener('online', () => {
   if (state.saveStatus === 'error') flushSave();
-  // connectivity was the likely killer of any dead-flagged card photo —
-  // give them all another chance now
-  if (reviveDeadImages() && state.phase === 'ready') render();
+  if (reviveDeadImages() && state.phase === 'ready') render(); // photos retry
 });
 
-// Flush a pending debounce as soon as the tab is backgrounded — the page is
-// still alive then, so the request usually completes; waiting for unload
-// would hand the browser a request it is free to kill.
+// flush on backgrounding, while the page is still alive to complete it —
+// waiting for unload hands the browser a request it is free to kill
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden' && saveTimer) flushSave();
 });
@@ -1783,8 +1720,7 @@ async function boot(client) {
 let bootInFlight = false;
 
 async function main() {
-  // repeated Retry taps (or Retry racing an 'online' event) must not stack
-  // CDN imports, clients, or duplicate auth listeners
+  // repeated Retry taps must not stack CDN imports or auth listeners
   if (bootInFlight) return;
   bootInFlight = true;
   try {
@@ -1809,8 +1745,7 @@ async function main() {
         auth: { persistSession: true, detectSessionInUrl: true },
       }));
     } catch (err) {
-      // without this, a rejection out of boot() parks the app on the loading
-      // splash with no error surface and no retry
+      // a rejection out of boot() would otherwise park the app on the splash
       state.phase = 'error';
       state.errorMsg = err?.message
         ? `Could not start: ${err.message}`

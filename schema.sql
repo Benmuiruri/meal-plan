@@ -18,8 +18,7 @@ create table staples (
   id         uuid primary key default gen_random_uuid(),
   user_id    uuid not null default auth.uid() references auth.users(id) on delete cascade,
   name       text not null,
-  last_price numeric(10,2), -- seeded starting hint only: price memory was
-                            -- dropped (plan 12.8), nothing writes this back
+  last_price numeric(10,2), -- seeded hint only; nothing writes it back (plan 12.8)
   sort_order integer not null default 0
 );
 
@@ -70,15 +69,9 @@ create trigger weeks_set_updated_at
   before update on weeks
   for each row execute function public.set_updated_at();
 
--- Meal photos live in a public Storage bucket. Unlike the tables above, this
--- whole section is idempotent — safe to re-run against a live project, and
--- re-running is how a deployed database converges on policy changes.
---
--- public = true serves objects at their public URL without RLS, so no select
--- policy exists — one would only grant anonymous listing of the bucket (an
--- earlier revision had exactly that; the drop below retires it). The bucket
--- caps uploads at 512KB JPEG: the app resizes to ~30-50KB, the cap backstops
--- anyone hitting the Storage API directly with household credentials.
+-- Meal photos. This section (unlike the tables above) is idempotent — re-run
+-- it to converge a live project. No select policy: public buckets serve reads
+-- without RLS, a policy would only grant anonymous listing (drop retires one).
 insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
 values ('meal-images', 'meal-images', true, 524288, array['image/jpeg'])
 on conflict (id) do update

@@ -1,10 +1,5 @@
-// Regression tests for the save pipeline: debounce, serialized flushes,
-// honest failure states, and self-healing zero-row saves.
-// Run with: node --test tests/app.test.mjs
-//
-// Sections 2–7 of index.html (constants through save pipeline) are sliced out
-// and imported with document stubbed; render() lives in the sliced-off view
-// layer, so a no-op stands in for it.
+// App-layer tests. Sections 2–7 of index.html are sliced out and imported
+// with document stubbed. Run with: node --test tests/app.test.mjs
 
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
@@ -325,10 +320,8 @@ test('a flush deferred behind an in-flight request fires immediately once the ta
 });
 
 // ── PGRST303 skew retry ────────────────────────────────────────────────
-// "JWT issued at future": a freshly minted token can look post-dated to a
-// Supabase node whose clock runs a beat behind the issuer's. The rejection
-// happens during auth, before the query executes, so a single delayed
-// re-run must absorb it — seen live on first production sign-in.
+// node clock skew rejects a fresh token before the query runs — one delayed
+// re-run must absorb it (seen live on first production sign-in)
 
 // counts attempts across any select/insert chain; errors[i] fails attempt i
 function fakeRetryClient(errors, data = [{ id: 's1' }]) {
@@ -487,9 +480,8 @@ test('removeMealImage refuses a url it cannot parse instead of silently doing no
   assert.equal(db.client.removed.length, 0);
 });
 
-// the reclaim gate: only a code SHAPE PostgREST can emit proves the server
-// answered — postgrest-js forwards a transport error's own code, so a
-// truthy code is not enough
+// only a PostgREST-shaped code proves the server answered — postgrest-js
+// forwards transport errors' own codes, so truthy is not enough
 test('isServerRejection accepts only PostgREST-shaped codes', () => {
   assert.equal(isServerRejection({ code: 'PGRST301' }), true);
   assert.equal(isServerRejection({ code: '23505' }), true);      // SQLSTATE from a constraint
@@ -702,9 +694,8 @@ test('the image-error and online wiring: capture phase, and recovery on connecti
 });
 
 // ── save-the-week & history ────────────────────────────────────────────
-// fake for the weeks-table paths performSaveWeek exercises end to end:
-// flushSave's update, markWeekSaved's status flip, loadActiveWeek's
-// select/insert. `log` records the operation order.
+// fake for every weeks-table path performSaveWeek exercises; `log` records
+// the operation order
 function fakeWeeksReader({ latest = null, saved = [], failWith = null, failSelect = false,
                            failStatusUpdate = false, flipZeroRows = false, delayMs = 0, hang = 0 } = {}) {
   const inserts = [];
@@ -866,9 +857,8 @@ test('the quiescence wait has a ceiling — a hung pipeline exits dirty with an 
 
 test('after a vanished row, a retry restores it via the flush self-heal and then freezes it', async () => {
   state.session = { user: { id: 'u1' } };
-  // the row disappears between the first flush and the first flip; the
-  // second attempt's flush hits zero rows, self-heals by upsert, and the
-  // flip lands on the restored row
+  // row vanishes between first flush and first flip; the retry's flush
+  // self-heals by upsert and the flip lands on the restored row
   let exists = true;
   let flips = 0;
   const log = [];
