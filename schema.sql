@@ -72,6 +72,8 @@ create trigger weeks_set_updated_at
 -- Meal photos. This section (unlike the tables above) is idempotent — re-run
 -- it to converge a live project. No select policy: public buckets serve reads
 -- without RLS, a policy would only grant anonymous listing (drop retires one).
+-- 512KB cap: the app resizes to ~30-50KB; the cap backstops anyone hitting
+-- the Storage API directly with household credentials.
 insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
 values ('meal-images', 'meal-images', true, 524288, array['image/jpeg'])
 on conflict (id) do update

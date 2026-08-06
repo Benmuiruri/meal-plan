@@ -537,6 +537,7 @@ async function resizeImage(file) {
   const bmp = await createImageBitmap(file).catch(() => {
     throw new Error("couldn't read that image — try a JPEG or PNG");
   });
+  // dimensions are unknowable before the decode — this guard cannot be hoisted
   if (bmp.width * bmp.height > 50e6) {
     bmp.close();
     throw new Error('that image has too many pixels — 50 megapixels max');
@@ -820,8 +821,10 @@ const state = {
   saveErrorPermanent: false, // error subtype: permanent failures get Reload, not Retry
 };
 
-// Volatile flag: a failed card photo degrades to the tinted tile and stays
-// there until reconnect (reviveDeadImages) or the next meals reload.
+// Volatile flag: a failed card photo degrades to the tinted tile. Cleared
+// ONLY by an online transition or a meals reload — a failure while the
+// browser stayed "online" keeps the tile; broader revival would refetch
+// permanently dead URLs on every trigger.
 function markDeadImage(imgEl) {
   if (imgEl?.tagName !== 'IMG') return false;
   const card = imgEl.closest('.meal-card[data-id]');
@@ -1441,7 +1444,7 @@ const actions = {
   'reload': () => { location.reload(); },
 
   'save-week': async () => {
-    if (saveWeekBusy()) return;
+    if (saveWeekBusy()) return; // belt; performSaveWeek's own guard is braces
     if (!confirm('Save this week and start the next?')) return;
     // gate the UI: an edit typed mid-flow would arm a debounced save that
     // fires into the just-frozen record
@@ -1623,7 +1626,7 @@ window.addEventListener('hashchange', () => {
 
 window.addEventListener('online', () => {
   if (state.saveStatus === 'error') flushSave();
-  if (reviveDeadImages() && state.phase === 'ready') render(); // photos retry
+  if (reviveDeadImages() && state.phase === 'ready') render();
 });
 
 // flush on backgrounding, while the page is still alive to complete it —
