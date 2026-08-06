@@ -68,3 +68,14 @@ $$;
 create trigger weeks_set_updated_at
   before update on weeks
   for each row execute function public.set_updated_at();
+
+-- Meal photos live in a public Storage bucket: anyone with the URL can view
+-- (the card grid loads them unauthenticated), only the household can upload.
+insert into storage.buckets (id, name, public) values ('meal-images', 'meal-images', true)
+on conflict (id) do nothing;
+
+create policy "anyone can view meal images" on storage.objects
+  for select using (bucket_id = 'meal-images');
+
+create policy "authenticated can upload meal images" on storage.objects
+  for insert to authenticated with check (bucket_id = 'meal-images');

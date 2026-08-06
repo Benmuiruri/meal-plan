@@ -435,3 +435,75 @@ test('the lunch change glue trims typed text and deletes the override when empti
   assert.match(live, /delete day\.lunch/, 'an emptied field must fall back to the default, not store ""');
   assert.match(live, /scheduleSave\(\)/);
 });
+
+// ── meal photo upload ──────────────────────────────────────────────────
+function fakeStorageClient({ failWith = null } = {}) {
+  const uploads = [];
+  return {
+    uploads,
+    storage: {
+      from: (bucket) => ({
+        upload: async (path, blob, opts) => {
+          uploads.push({ bucket, path, blob, opts });
+          return failWith ? { data: null, error: failWith } : { data: { path }, error: null };
+        },
+        getPublicUrl: (path) => ({ data: { publicUrl: `https://cdn.example/${bucket}/${path}` } }),
+      }),
+    },
+  };
+}
+
+test('uploadMealImage stores a jpeg in meal-images and returns its public url', async () => {
+  db.client = fakeStorageClient();
+  const blob = { size: 42000 };
+  const url = await db.uploadMealImage(blob);
+  const [up] = db.client.uploads;
+  assert.equal(db.client.uploads.length, 1);
+  assert.equal(up.bucket, 'meal-images');
+  assert.match(up.path, /^[0-9a-f-]{36}\.jpg$/, 'object name is a uuid, never the user filename');
+  assert.equal(up.blob, blob);
+  assert.equal(up.opts.contentType, 'image/jpeg');
+  assert.equal(url, `https://cdn.example/meal-images/${up.path}`);
+});
+
+test('uploadMealImage generates a fresh path per call — a retried upload cannot collide', async () => {
+  db.client = fakeStorageClient();
+  await db.uploadMealImage({});
+  await db.uploadMealImage({});
+  const [a, b] = db.client.uploads;
+  assert.notEqual(a.path, b.path);
+});
+
+test('uploadMealImage surfaces storage failures', async () => {
+  db.client = fakeStorageClient({ failWith: { message: 'Payload too large' } });
+  await assert.rejects(db.uploadMealImage({}), (err) => err.message === 'Payload too large');
+});
+
+test('the add-meal sheet offers a file upload, not a URL field', async () => {
+  const tmplStart = html.indexOf('function viewAddSheet');
+  const tmplEnd = html.indexOf('/* ---------- Week');
+  assert.ok(tmplStart > 0 && tmplEnd > tmplStart, 'add-sheet markers found in index.html');
+  const escStart = html.indexOf('const esc =');
+  const escEnd = html.indexOf('[c]));', escStart);
+  const mod = await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(
+    `const state = { errorMsg: '' };
+     ${html.slice(escStart, escEnd + '[c]));'.length)}
+     ${html.slice(tmplStart, tmplEnd)}
+     export { viewAddSheet };`));
+  const out = mod.viewAddSheet('main');
+  assert.match(out, /type="file"/);
+  assert.match(out, /accept="image\/\*"/);
+  assert.doesNotMatch(out, /type="url"/, 'the pasted-URL field is gone');
+});
+
+test('the add-meal submit glue resizes then uploads before saving the meal', () => {
+  const hStart = html.indexOf("if (form.id === 'form-addmeal')");
+  const hEnd = html.indexOf("if (form.id === 'form-additem')");
+  assert.ok(hStart > 0 && hEnd > hStart, 'add-meal handler markers found in index.html');
+  const live = html.slice(hStart, hEnd)
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/[^\n]*/g, '');
+  assert.match(live, /resizeImage\(/);
+  assert.match(live, /uploadMealImage\(/);
+  assert.match(live, /db\.addMeal\(/);
+});

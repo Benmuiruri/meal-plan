@@ -21,7 +21,7 @@ The app keeps that exact rhythm. It removes the retyping, the jumping between no
 
 | Question | Decision |
 |---|---|
-| Images | You curate — paste a URL or pick a photo. App works fully with none. |
+| Images | You curate — pick a photo, resized in-browser, stored in Supabase Storage. App works fully with none. |
 | Groceries | Staples list you tick, plus free manual rows. No ingredient auto-suggestion. |
 | History | Read-only look-back at past weeks |
 | Data | **Supabase from day one.** Same weeks on every device. |
@@ -96,9 +96,7 @@ Every change writes to the current week's row, debounced at 800ms so typing a pr
 
 ### Images
 
-Phase 1 takes a pasted URL only, stored as text. Nothing to configure.
-
-Phase 2 adds photo upload through a public Supabase Storage bucket called `meal-images`, resized to 400px wide JPEG in the browser before it leaves your phone — roughly 30–50KB each, well inside the 1GB free tier.
+Adding a meal takes a photo upload. The browser resizes it to a 400px-wide JPEG (roughly 30–50KB, well inside the 1GB free tier) before it leaves your phone, stores it under a fresh uuid in the public Storage bucket `meal-images` (bucket and policies live in `schema.sql`), and saves the public URL on the meal. The library's starting photos were bulk-loaded the same way (2026-08-06). An earlier revision took a pasted URL instead; that field is gone.
 
 ---
 
@@ -163,7 +161,7 @@ Written on first sign-in, all editable, none permanent.
 
 **Mains (12)** — chapo + chicken stew, rice biriani, chapo + maini stew, fish fillet, meat balls, tumbukiza + chapo, steak, pasta salad, potato salad, noodles, matoke, cheesy hot dogs
 
-**Breakfasts (15)** — weetabix; nwaci + egg + avocado; oats; uji + peanuts; boiled maize + egg; liver + vegetables; mandizi + vegetables; mushroom + scrambled; bone soup + buns; pumpkin soup + buns; butter soup + buns; smoothie + cake; grape salad; cornflakes + egg; mbaazi + mahamri
+**Breakfasts (15)** — weetabix; fried egg + nduma + avocado; oats; uji + peanuts; boiled maize + egg; liver + vegetables; mandizi + vegetables; mushroom + scrambled; bone soup + buns; pumpkin soup + buns; butter soup + buns; smoothie + cake; grape salad; cornflakes + egg; mbaazi + mahamri
 
 **Staples** — maize 50, eggs 100, beans, carrots, spinach, bell peppers, lettuce, chicken 400, pork 350, beef 200, fruits
 
@@ -175,7 +173,7 @@ Written on first sign-in, all editable, none permanent.
 Supabase schema, magic link sign-in, seeding, save-failure handling, design tokens, nav, Pick, Week with swapping, Budget, Summary. Images by pasted URL. You can plan a real week and deploy the same day.
 
 **Phase 2 — the rest of the promise.**
-Photo upload to Storage, staple price memory, save to history, History screen.
+Staple price memory, save to history, History screen. (Photo upload to Storage shipped early, 2026-08-06.)
 
 **Phase 3 — polish.**
 Library editing and archiving, delete a saved week, keyboard focus states, web manifest so it installs to your home screen with a proper icon.
@@ -213,3 +211,4 @@ The sequence matters — auth emails (password resets) need to know your live UR
 4. Offline support — **removed entirely**, superseding the offline-ticks decision made earlier the same day. The app is used online only; section 4's market-connectivity concern was judged overstated in practice. Failed saves surface a *Not saved* banner with a Retry instead.
 5. Sign-in — **one shared household account with a password**, replacing magic links. Two people, one plan: separate accounts would mean separate RLS-scoped datasets. The account is pre-created in Supabase (no sign-up flow in the app); credentials live with the household, never in this repo.
 6. First-use feedback (same day): tabs renamed **Choose meals** and **Menu**; lunch became an editable free-text line defaulting to yesterday's dinner; the *Fruits — whatever's left* remainder toggle was dropped for a plain Fruits staple; number inputs lost their spinner arrows; the beans row lost its `1kg` unit tag (units are no longer shown anywhere).
+7. Images (2026-08-06) — **upload, not URL**. The add-meal sheet takes a photo file, resized in-browser to 400px JPEG and stored in the public `meal-images` bucket. The household's downloaded photos were bulk-loaded and linked: all 15 breakfasts, plus pasta salad, matoke, and two new mains **Ugali + beef** and **Ugali + mbuzi**; "Nwaci + egg + avocado" was renamed **"Fried egg + nduma + avocado"**. The vegetables photo is shared by both vegetable combos. Remaining mains keep coloured tiles until photos are added.

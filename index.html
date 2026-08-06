@@ -422,7 +422,7 @@ const SEED_MAINS = [
   'Noodles', 'Matoke', 'Cheesy hot dogs',
 ];
 const SEED_BREAKFASTS = [
-  'Weetabix', 'Nwaci + egg + avocado', 'Oats', 'Uji + peanuts', 'Boiled maize + egg',
+  'Weetabix', 'Fried egg + nduma + avocado', 'Oats', 'Uji + peanuts', 'Boiled maize + egg',
   'Liver + vegetables', 'Mandizi + vegetables', 'Mushroom + scrambled', 'Bone soup + buns',
   'Pumpkin soup + buns', 'Butter soup + buns', 'Smoothie + cake', 'Grape salad',
   'Cornflakes + egg', 'Mbaazi + mahamri',
@@ -469,6 +469,23 @@ function currentMonday() {
 }
 
 const reducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+// A phone photo is 3–5MB; the card needs ~30–50KB. Downscale to 400px wide
+// and re-encode as JPEG before anything leaves the device.
+async function resizeImage(file, maxW = 400) {
+  const bmp = await createImageBitmap(file).catch(() => {
+    throw new Error("couldn't read that image — try a JPEG or PNG");
+  });
+  const scale = Math.min(1, maxW / bmp.width);
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(bmp.width * scale);
+  canvas.height = Math.round(bmp.height * scale);
+  canvas.getContext('2d').drawImage(bmp, 0, 0, canvas.width, canvas.height);
+  bmp.close();
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.82));
+  if (!blob) throw new Error("couldn't process that image");
+  return blob;
+}
 
 /* ================================================================
    4. DOMAIN — pure functions, no DOM, no network
@@ -620,6 +637,16 @@ const db = {
       .insert({ user_id: userId, name, kind, image_url, tint }).select().single();
     if (error) throw error;
     return data;
+  },
+
+  // The object name is a fresh uuid per attempt — never the user's filename,
+  // and a skew-retry re-run can't collide with a half-finished earlier upload.
+  async uploadMealImage(blob) {
+    const path = `${crypto.randomUUID()}.jpg`;
+    const { error } = await this.client.storage.from('meal-images')
+      .upload(path, blob, { contentType: 'image/jpeg', cacheControl: '31536000' });
+    if (error) throw error;
+    return this.client.storage.from('meal-images').getPublicUrl(path).data.publicUrl;
   },
 };
 
@@ -887,7 +914,7 @@ function viewAddSheet(kind) {
       <h3>New ${kind}</h3>
       <form id="form-addmeal">
         <input class="field" type="text" name="name" placeholder="Name" required maxlength="80" autocomplete="off">
-        <input class="field" type="url" name="image_url" placeholder="Image URL (optional)" autocomplete="off">
+        <input class="field" type="file" name="image" accept="image/*" aria-label="Photo (optional)">
         <div class="row-btns">
           <button type="button" class="btn-quiet" data-action="close-add">Cancel</button>
           <button type="submit" class="btn-primary">Add</button>
@@ -1252,8 +1279,10 @@ document.addEventListener('submit', async (e) => {
     if (!name) return;
     const kind = state.pickTab === 'mains' ? 'main' : 'breakfast';
     const tint = TINTS[state.meals.length % TINTS.length];
-    const image_url = form.image_url.value.trim() || null;
+    const file = form.image.files[0];
+    form.querySelector('button[type="submit"]').disabled = true; // an upload takes a beat — no double adds
     try {
+      const image_url = file ? await db.uploadMealImage(await resizeImage(file)) : null;
       const meal = await db.addMeal(state.session.user.id, { name, kind, image_url, tint });
       state.meals.push(meal);
       state.addOpen = false;
