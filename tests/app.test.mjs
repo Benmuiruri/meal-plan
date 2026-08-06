@@ -39,10 +39,10 @@ const src = html.slice(start, viewsBanner) + `
 function render() {}
 function viewSaveErrorBanner() { const k = state.saveErrorPermanent ? 'permanent' : 'transient'; return '<banner data-kind="' + k + '">' + k + '</banner>'; }
 export { state, db, scheduleSave, flushSave, signIn, resizeImage, isServerRejection,
-         markDeadImage, reviveDeadImages };`;
+         markDeadImage, reviveDeadImages, performSaveWeek };`;
 
 const { state, db, scheduleSave, flushSave, signIn, resizeImage, isServerRejection,
-        markDeadImage, reviveDeadImages } =
+        markDeadImage, reviveDeadImages, performSaveWeek } =
   await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(src));
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -702,26 +702,41 @@ test('the image-error and online wiring: capture phase, and recovery on connecti
 });
 
 // ── save-the-week & history ────────────────────────────────────────────
-// fake for the weeks-table read paths loadActiveWeek/listSavedWeeks use
-function fakeWeeksReader({ latest = null, saved = [], failWith = null } = {}) {
+// fake for the weeks-table paths performSaveWeek exercises end to end:
+// flushSave's update, markWeekSaved's status flip, loadActiveWeek's
+// select/insert. `log` records the operation order.
+function fakeWeeksReader({ latest = null, saved = [], failWith = null,
+                           failSelect = false, failStatusUpdate = false, delayMs = 0 } = {}) {
   const inserts = [];
   const filters = [];
+  const log = [];
   return {
     inserts,
     filters,
+    log,
     from() {
+      const q = { op: 'select', payload: null, statusEq: false };
       const b = {
-        op: 'select',
-        select: () => b, limit: () => b, maybeSingle: () => b, single: () => b,
-        eq: (col, val) => { filters.push(['eq', col, val]); return b; },
+        select: () => b, maybeSingle: () => b, single: () => b,
+        limit: (n) => { filters.push(['limit', n]); return b; },
+        eq: (col, val) => { if (col === 'status') q.statusEq = true; filters.push(['eq', col, val]); return b; },
         order: (col, opts) => { filters.push(['order', col, opts?.ascending]); return b; },
-        insert(payload) { b.op = 'insert'; inserts.push(payload); return b; },
+        insert(payload) { q.op = 'insert'; inserts.push(payload); return b; },
+        update(payload) { q.op = 'update'; q.payload = payload; return b; },
         async then(resolve) {
+          if (delayMs) await sleep(delayMs);
+          log.push(q.op === 'update' ? (q.payload?.status ? 'flip-status' : 'flush-week') : q.op);
           if (failWith) return resolve({ data: null, error: failWith });
-          if (b.op === 'insert') {
+          if (q.op === 'update') {
+            return resolve(q.payload?.status && failStatusUpdate
+              ? { data: null, error: { message: 'flip refused' } }
+              : { data: [{ id: 'w1' }], error: null });
+          }
+          if (q.op === 'insert') {
             return resolve({ data: { id: 'new-week', status: 'draft', ...inserts[inserts.length - 1] }, error: null });
           }
-          resolve({ data: filters.some((f) => f[0] === 'eq') ? saved : latest, error: null });
+          if (failSelect) return resolve({ data: null, error: { message: 'select refused' } });
+          resolve({ data: q.statusEq ? saved : latest, error: null });
         },
       };
       return b;
@@ -734,13 +749,15 @@ test('loadActiveWeek resumes the newest draft no matter how stale', async () => 
   db.client = fakeWeeksReader({ latest: draft });
   assert.equal(await db.loadActiveWeek('u1', '2026-08-03'), draft);
   assert.equal(db.client.inserts.length, 0, 'an old draft is resumed, never replaced');
+  // "the newest row" is a query shape, not an accident of the fake
+  assert.deepEqual(db.client.filters, [['order', 'week_start', false], ['limit', 1]]);
 });
 
 test('loadActiveWeek after a mid-week save starts the following Monday', async () => {
   db.client = fakeWeeksReader({ latest: { id: 'w1', status: 'saved', week_start: '2026-08-03' } });
   const week = await db.loadActiveWeek('u1', '2026-08-03');
   assert.deepEqual(db.client.inserts, [{ user_id: 'u1', week_start: '2026-08-10' }]);
-  assert.equal(week.status, 'draft');
+  assert.equal(week.id, 'new-week');
 });
 
 test('loadActiveWeek after a stale save jumps to the current Monday', async () => {
@@ -771,18 +788,64 @@ test('listSavedWeeks asks for saved rows newest first', async () => {
   assert.deepEqual(db.client.filters, [['eq', 'status', 'saved'], ['order', 'week_start', false]]);
 });
 
-test('the save-week glue flushes first, gates on a clean save, and invalidates the history cache', () => {
+test('performSaveWeek runs flush, status flip, next draft — in that order', async () => {
+  state.session = { user: { id: 'u1' } };
+  state.history = [{ id: 'stale' }];
+  db.client = fakeWeeksReader({ latest: { id: 'w1', status: 'saved', week_start: '2026-08-03' } });
+  assert.equal(await performSaveWeek('2026-08-03'), 'done');
+  assert.deepEqual(db.client.log, ['flush-week', 'flip-status', 'select', 'insert'],
+    'reordering the flow is a different flow');
+  assert.equal(state.week.week_start, '2026-08-10'); // computed by nextDraftStart, not the fake
+  assert.equal(state.week.id, 'new-week');
+  assert.equal(state.history, null, 'the cached list no longer has the newest week');
+});
+
+test('performSaveWeek refuses to freeze a week whose sync failed', async () => {
+  state.session = { user: { id: 'u1' } };
+  db.client = fakeWeeksReader({ failWith: { message: 'down' } });
+  assert.equal(await performSaveWeek('2026-08-03'), 'dirty');
+  assert.ok(!db.client.log.includes('flip-status'), 'stale data must never become the record');
+  assert.equal(state.saveStatus, 'error');
+});
+
+test('a failed status flip changes nothing and reports save-failed', async () => {
+  state.session = { user: { id: 'u1' } };
+  db.client = fakeWeeksReader({ failStatusUpdate: true });
+  assert.equal(await performSaveWeek('2026-08-03'), 'save-failed');
+  assert.equal(state.week.status, 'draft');
+  assert.equal(db.client.inserts.length, 0);
+});
+
+test('a failed next-draft load still flips memory to saved — the record cannot resurrect as a draft', async () => {
+  state.session = { user: { id: 'u1' } };
+  db.client = fakeWeeksReader({ failSelect: true });
+  const frozen = state.week;
+  assert.equal(await performSaveWeek('2026-08-03'), 'load-failed');
+  // the self-heal upsert writes week.status verbatim — this is what stops it
+  // un-saving the record if the frozen row ever needs restoring
+  assert.equal(frozen.status, 'saved');
+  assert.equal(state.week, frozen, 'no half-initialized draft is installed');
+  assert.equal(state.history, null);
+});
+
+test('performSaveWeek is single-flight: the second tap of a double-tap is busy', async () => {
+  state.session = { user: { id: 'u1' } };
+  db.client = fakeWeeksReader({ latest: { id: 'w1', status: 'saved', week_start: '2026-08-03' }, delayMs: 25 });
+  const [first, second] = await Promise.all([performSaveWeek('2026-08-03'), performSaveWeek('2026-08-03')]);
+  assert.equal(first, 'done');
+  assert.equal(second, 'busy');
+  assert.equal(db.client.inserts.length, 1, 'exactly one next draft, no unique-key collision');
+});
+
+test('the save-week action defers to performSaveWeek and locks the UI on load-failed', () => {
   const hStart = html.indexOf("'save-week':");
   const hEnd = html.indexOf("'retry-history':");
   assert.ok(hStart > 0 && hEnd > hStart, 'save-week handler markers found in index.html');
   const live = html.slice(hStart, hEnd)
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/\/\/[^\n]*/g, '');
-  assert.match(live, /await flushSave\(\)/);
-  assert.match(live, /state\.saveStatus !== 'saved'/, 'a failed sync must block freezing the week');
-  assert.match(live, /markWeekSaved\(state\.week\.id\)/);
-  assert.match(live, /state\.history = null/, 'the cached list is stale once a week is saved');
-  assert.match(live, /loadActiveWeek\(/);
+  assert.match(live, /await performSaveWeek\(currentMonday\(\)\)/);
+  assert.match(live, /state\.phase = 'error'/, 'a frozen week must not stay editable');
 });
 
 // ── history templates, executed with the real domain slice ────────────

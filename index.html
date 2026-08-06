@@ -929,6 +929,43 @@ function setSaveStatus(status) {
   }
 }
 
+// Freezing the week, as one guarded flow. The caller owns dialogs and
+// navigation; this owns the ordering and the failure states:
+//   'busy'        — a save-week is already running (double-tap)
+//   'dirty'       — pending edits could not reach Supabase; freezing now
+//                   would make stale data the permanent record
+//   'save-failed' — the status flip itself failed; nothing changed
+//   'load-failed' — the week IS saved (state.week.status flips in memory at
+//                   once, so the self-heal upsert can never resurrect it as
+//                   a draft) but the next draft could not start — the caller
+//                   must lock the UI, not shrug
+//   'done'        — state.week is the fresh draft
+let saveWeekInFlight = false;
+async function performSaveWeek(todayMonday) {
+  if (saveWeekInFlight) return 'busy';
+  saveWeekInFlight = true;
+  try {
+    await flushSave();
+    if (state.saveStatus !== 'saved') return 'dirty';
+    try {
+      await db.markWeekSaved(state.week.id);
+    } catch {
+      return 'save-failed';
+    }
+    state.week.status = 'saved';
+    state.history = null; // the cached list no longer has the newest week
+    try {
+      state.week = await db.loadActiveWeek(state.session.user.id, todayMonday);
+    } catch {
+      return 'load-failed';
+    }
+    state.lifted = null;
+    return 'done';
+  } finally {
+    saveWeekInFlight = false;
+  }
+}
+
 /* ================================================================
    8. VIEWS
    ================================================================ */
@@ -1418,32 +1455,24 @@ const actions = {
   'retry-save': () => { flushSave(); },
   'reload': () => { location.reload(); },
 
-  // Flush first so the row being frozen is the row on screen; only a clean
-  // 'saved' status may proceed — saving over a failed sync would freeze
-  // stale data as the permanent record.
+  // performSaveWeek owns ordering and failure states; this owns the dialogs
+  // and where each outcome lands.
   'save-week': async () => {
     if (!confirm('Save this week and start the next?')) return;
-    await flushSave();
-    if (state.saveStatus !== 'saved') {
+    const outcome = await performSaveWeek(currentMonday());
+    if (outcome === 'dirty') {
       alert("Your latest changes haven't reached Supabase — retry the save first, then save the week.");
-      return;
+    } else if (outcome === 'save-failed') {
+      alert("Couldn't save the week — nothing was changed, try again.");
+    } else if (outcome === 'load-failed') {
+      // the frozen week must not stay editable — lock into the error screen,
+      // whose Try again resyncs and picks up the fresh draft
+      state.phase = 'error';
+      state.errorMsg = 'The week was saved, but starting the next one failed. Tap Try again.';
+      render();
+    } else if (outcome === 'done') {
+      location.hash = '#/pick'; // hashchange paints the fresh week once
     }
-    try {
-      await db.markWeekSaved(state.week.id);
-    } catch (err) {
-      alert(`Couldn't save the week: ${err?.message ?? 'no connection'}. Nothing was lost — try again.`);
-      return;
-    }
-    state.history = null; // the cached list no longer has the newest week
-    try {
-      state.week = await db.loadActiveWeek(state.session.user.id, currentMonday());
-    } catch {
-      alert('The week is saved, but starting the next one failed — reload to continue.');
-      return;
-    }
-    state.lifted = null;
-    location.hash = '#/pick'; // a fresh week starts at choosing meals
-    render();
   },
 
   'retry-history': () => {
@@ -1628,6 +1657,7 @@ async function initData() {
     state.meals = meals;
     state.staples = staples;
     state.week = week;
+    state.history = null; // a resync must re-read past weeks too
     state.saveStatus = 'saved';
     state.phase = 'ready';
     const { route, detail } = currentRoute();

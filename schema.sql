@@ -18,7 +18,8 @@ create table staples (
   id         uuid primary key default gen_random_uuid(),
   user_id    uuid not null default auth.uid() references auth.users(id) on delete cascade,
   name       text not null,
-  last_price numeric(10,2),
+  last_price numeric(10,2), -- seeded starting hint only: price memory was
+                            -- dropped (plan 12.8), nothing writes this back
   sort_order integer not null default 0
 );
 
