@@ -729,7 +729,7 @@ function fakeWeeksReader({ latest = null, saved = [], failWith = null,
           if (failWith) return resolve({ data: null, error: failWith });
           if (q.op === 'update') {
             return resolve(q.payload?.status && failStatusUpdate
-              ? { data: null, error: { message: 'flip refused' } }
+              ? { data: null, error: failStatusUpdate }
               : { data: [{ id: 'w1' }], error: null });
           }
           if (q.op === 'insert') {
@@ -792,7 +792,7 @@ test('performSaveWeek runs flush, status flip, next draft — in that order', as
   state.session = { user: { id: 'u1' } };
   state.history = [{ id: 'stale' }];
   db.client = fakeWeeksReader({ latest: { id: 'w1', status: 'saved', week_start: '2026-08-03' } });
-  assert.equal(await performSaveWeek('2026-08-03'), 'done');
+  assert.equal((await performSaveWeek('2026-08-03')).outcome, 'done');
   assert.deepEqual(db.client.log, ['flush-week', 'flip-status', 'select', 'insert'],
     'reordering the flow is a different flow');
   assert.equal(state.week.week_start, '2026-08-10'); // computed by nextDraftStart, not the fake
@@ -803,24 +803,42 @@ test('performSaveWeek runs flush, status flip, next draft — in that order', as
 test('performSaveWeek refuses to freeze a week whose sync failed', async () => {
   state.session = { user: { id: 'u1' } };
   db.client = fakeWeeksReader({ failWith: { message: 'down' } });
-  assert.equal(await performSaveWeek('2026-08-03'), 'dirty');
+  assert.equal((await performSaveWeek('2026-08-03')).outcome, 'dirty');
   assert.ok(!db.client.log.includes('flip-status'), 'stale data must never become the record');
   assert.equal(state.saveStatus, 'error');
 });
 
-test('a failed status flip changes nothing and reports save-failed', async () => {
+test('performSaveWeek waits out an in-flight flush instead of misreading saving as dirty', async () => {
   state.session = { user: { id: 'u1' } };
-  db.client = fakeWeeksReader({ failStatusUpdate: true });
-  assert.equal(await performSaveWeek('2026-08-03'), 'save-failed');
+  db.client = fakeWeeksReader({ latest: { id: 'w1', status: 'saved', week_start: '2026-08-03' }, delayMs: 40 });
+  const inflight = flushSave();            // the pipeline is mid-flush when save-week arrives
+  const result = await performSaveWeek('2026-08-03');
+  await inflight;
+  assert.equal(result.outcome, 'done', 'a healthy pipeline mid-flush is not a dirty week');
+});
+
+test('a REJECTED status flip (coded) changes nothing and reports save-failed with the reason', async () => {
+  state.session = { user: { id: 'u1' } };
+  db.client = fakeWeeksReader({ failStatusUpdate: { code: '42501', message: 'permission denied' } });
+  const { outcome, error } = await performSaveWeek('2026-08-03');
+  assert.equal(outcome, 'save-failed');
+  assert.equal(error.message, 'permission denied', 'the reason survives to the caller');
   assert.equal(state.week.status, 'draft');
   assert.equal(db.client.inserts.length, 0);
+});
+
+test('an UNKNOWN flip outcome (no code) reports save-unknown — the row may be frozen', async () => {
+  state.session = { user: { id: 'u1' } };
+  db.client = fakeWeeksReader({ failStatusUpdate: { message: 'TypeError: Failed to fetch' } });
+  assert.equal((await performSaveWeek('2026-08-03')).outcome, 'save-unknown');
+  assert.equal(db.client.inserts.length, 0, 'no next draft on an unconfirmed save');
 });
 
 test('a failed next-draft load still flips memory to saved — the record cannot resurrect as a draft', async () => {
   state.session = { user: { id: 'u1' } };
   db.client = fakeWeeksReader({ failSelect: true });
   const frozen = state.week;
-  assert.equal(await performSaveWeek('2026-08-03'), 'load-failed');
+  assert.equal((await performSaveWeek('2026-08-03')).outcome, 'load-failed');
   // the self-heal upsert writes week.status verbatim — this is what stops it
   // un-saving the record if the frozen row ever needs restoring
   assert.equal(frozen.status, 'saved');
@@ -832,20 +850,25 @@ test('performSaveWeek is single-flight: the second tap of a double-tap is busy',
   state.session = { user: { id: 'u1' } };
   db.client = fakeWeeksReader({ latest: { id: 'w1', status: 'saved', week_start: '2026-08-03' }, delayMs: 25 });
   const [first, second] = await Promise.all([performSaveWeek('2026-08-03'), performSaveWeek('2026-08-03')]);
-  assert.equal(first, 'done');
-  assert.equal(second, 'busy');
+  assert.equal(first.outcome, 'done');
+  assert.equal(second.outcome, 'busy');
   assert.equal(db.client.inserts.length, 1, 'exactly one next draft, no unique-key collision');
 });
 
-test('the save-week action defers to performSaveWeek and locks the UI on load-failed', () => {
+test('the save-week action maps every outcome: alerts for retryable, error-lock for unknowable, pick for done', () => {
   const hStart = html.indexOf("'save-week':");
   const hEnd = html.indexOf("'retry-history':");
   assert.ok(hStart > 0 && hEnd > hStart, 'save-week handler markers found in index.html');
   const live = html.slice(hStart, hEnd)
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/\/\/[^\n]*/g, '');
+  assert.match(live, /if \(saveWeekBusy\(\)\) return/, 'no second confirm during a running save');
   assert.match(live, /await performSaveWeek\(currentMonday\(\)\)/);
-  assert.match(live, /state\.phase = 'error'/, 'a frozen week must not stay editable');
+  assert.match(live, /outcome === 'dirty'/);
+  assert.match(live, /outcome === 'save-failed'[\s\S]{0,120}?error\?\.message/, 'the rejection reason reaches the user');
+  assert.match(live, /outcome === 'save-unknown' \|\| outcome === 'load-failed'[\s\S]{0,400}?state\.phase = 'error'/,
+    'both unknowable outcomes lock into the resync screen');
+  assert.match(live, /outcome === 'done'[\s\S]{0,80}?location\.hash = '#\/pick'/);
 });
 
 // ── history templates, executed with the real domain slice ────────────

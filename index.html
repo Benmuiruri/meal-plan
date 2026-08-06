@@ -930,37 +930,47 @@ function setSaveStatus(status) {
 }
 
 // Freezing the week, as one guarded flow. The caller owns dialogs and
-// navigation; this owns the ordering and the failure states:
-//   'busy'        — a save-week is already running (double-tap)
-//   'dirty'       — pending edits could not reach Supabase; freezing now
-//                   would make stale data the permanent record
-//   'save-failed' — the status flip itself failed; nothing changed
-//   'load-failed' — the week IS saved (state.week.status flips in memory at
-//                   once, so the self-heal upsert can never resurrect it as
-//                   a draft) but the next draft could not start — the caller
-//                   must lock the UI, not shrug
-//   'done'        — state.week is the fresh draft
+// navigation; this owns the ordering and the failure outcomes:
+//   busy         — a save-week is already running (double-tap)
+//   dirty        — pending edits could not reach Supabase; freezing now
+//                  would make stale data the permanent record
+//   save-failed  — the server REJECTED the flip (coded error): provably
+//                  nothing changed, retrying is honest advice
+//   save-unknown — the flip's outcome is unknowable (transport failure, or
+//                  the row vanished): the row may be frozen while memory
+//                  says draft. Only a resync can tell — the caller must
+//                  lock the UI into it, and loadActiveWeek then lands on
+//                  the truth whichever way the flip went.
+//   load-failed  — the week IS saved (state.week.status flips in memory at
+//                  once, so the self-heal upsert can never resurrect it as
+//                  a draft) but the next draft could not start — lock, not
+//                  shrug
+//   done         — state.week is the fresh draft
 let saveWeekInFlight = false;
+const saveWeekBusy = () => saveWeekInFlight;
 async function performSaveWeek(todayMonday) {
-  if (saveWeekInFlight) return 'busy';
+  if (saveWeekInFlight) return { outcome: 'busy' };
   saveWeekInFlight = true;
   try {
     await flushSave();
-    if (state.saveStatus !== 'saved') return 'dirty';
+    // a flush requested while another was in flight re-queues on a timer —
+    // wait the pipeline out rather than misreading 'saving' as failure
+    while (state.saveStatus === 'saving') await new Promise((r) => setTimeout(r, 50));
+    if (state.saveStatus !== 'saved') return { outcome: 'dirty' };
     try {
       await db.markWeekSaved(state.week.id);
-    } catch {
-      return 'save-failed';
+    } catch (err) {
+      return { outcome: isServerRejection(err) ? 'save-failed' : 'save-unknown', error: err };
     }
     state.week.status = 'saved';
     state.history = null; // the cached list no longer has the newest week
     try {
       state.week = await db.loadActiveWeek(state.session.user.id, todayMonday);
-    } catch {
-      return 'load-failed';
+    } catch (err) {
+      return { outcome: 'load-failed', error: err };
     }
     state.lifted = null;
-    return 'done';
+    return { outcome: 'done' };
   } finally {
     saveWeekInFlight = false;
   }
@@ -1455,20 +1465,23 @@ const actions = {
   'retry-save': () => { flushSave(); },
   'reload': () => { location.reload(); },
 
-  // performSaveWeek owns ordering and failure states; this owns the dialogs
-  // and where each outcome lands.
+  // performSaveWeek owns ordering and failure outcomes; this owns the
+  // dialogs and where each outcome lands.
   'save-week': async () => {
+    if (saveWeekBusy()) return; // no second confirm for an impatient tap
     if (!confirm('Save this week and start the next?')) return;
-    const outcome = await performSaveWeek(currentMonday());
+    const { outcome, error } = await performSaveWeek(currentMonday());
     if (outcome === 'dirty') {
       alert("Your latest changes haven't reached Supabase — retry the save first, then save the week.");
     } else if (outcome === 'save-failed') {
-      alert("Couldn't save the week — nothing was changed, try again.");
-    } else if (outcome === 'load-failed') {
-      // the frozen week must not stay editable — lock into the error screen,
-      // whose Try again resyncs and picks up the fresh draft
+      alert(`Couldn't save the week: ${error?.message ?? 'refused'}. Nothing was changed — try again.`);
+    } else if (outcome === 'save-unknown' || outcome === 'load-failed') {
+      // in both, editing must stop — the error screen's Try again resyncs
+      // onto the truth: the fresh draft, or this week still a draft
       state.phase = 'error';
-      state.errorMsg = 'The week was saved, but starting the next one failed. Tap Try again.';
+      state.errorMsg = outcome === 'save-unknown'
+        ? "Couldn't confirm whether the week was saved. Tap Try again — the resync sorts it out either way."
+        : 'The week was saved, but starting the next one failed. Tap Try again.';
       render();
     } else if (outcome === 'done') {
       location.hash = '#/pick'; // hashchange paints the fresh week once
@@ -1657,7 +1670,8 @@ async function initData() {
     state.meals = meals;
     state.staples = staples;
     state.week = week;
-    state.history = null; // a resync must re-read past weeks too
+    state.history = null;  // a resync must re-read past weeks too
+    state.historyError = ''; // and not leave a stale failure painted over them
     state.saveStatus = 'saved';
     state.phase = 'ready';
     const { route, detail } = currentRoute();
