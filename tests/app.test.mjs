@@ -38,9 +38,11 @@ assert.ok(start > 0 && viewsBanner > start, 'section markers found in index.html
 const src = html.slice(start, viewsBanner) + `
 function render() {}
 function viewSaveErrorBanner() { const k = state.saveErrorPermanent ? 'permanent' : 'transient'; return '<banner data-kind="' + k + '">' + k + '</banner>'; }
-export { state, db, scheduleSave, flushSave, signIn, resizeImage, isServerRejection };`;
+export { state, db, scheduleSave, flushSave, signIn, resizeImage, isServerRejection,
+         markDeadImage, reviveDeadImages };`;
 
-const { state, db, scheduleSave, flushSave, signIn, resizeImage, isServerRejection } =
+const { state, db, scheduleSave, flushSave, signIn, resizeImage, isServerRejection,
+        markDeadImage, reviveDeadImages } =
   await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(src));
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -485,13 +487,17 @@ test('removeMealImage refuses a url it cannot parse instead of silently doing no
   assert.equal(db.client.removed.length, 0);
 });
 
-// the reclaim gate: only a server rejection proves the insert wrote nothing
-test('isServerRejection separates coded rejections from transport unknowns', () => {
+// the reclaim gate: only a code SHAPE PostgREST can emit proves the server
+// answered — postgrest-js forwards a transport error's own code, so a
+// truthy code is not enough
+test('isServerRejection accepts only PostgREST-shaped codes', () => {
   assert.equal(isServerRejection({ code: 'PGRST301' }), true);
   assert.equal(isServerRejection({ code: '23505' }), true);      // SQLSTATE from a constraint
-  // postgrest-js maps a fetch failure to code: '' — the response may have
-  // been lost after the row was written, so this must NOT count
+  assert.equal(isServerRejection({ code: '42501' }), true);      // SQLSTATE from RLS
+  // forwarded transport codes, all unknowns — the row may have been written:
   assert.equal(isServerRejection({ code: '', message: 'TypeError: Failed to fetch' }), false);
+  assert.equal(isServerRejection({ code: '20', message: 'AbortError: signal is aborted' }), false);
+  assert.equal(isServerRejection({ code: 20 }), false, 'a non-string code is never a PostgREST answer');
   assert.equal(isServerRejection(new TypeError('Failed to fetch')), false);
   assert.equal(isServerRejection(undefined), false);
 });
@@ -651,13 +657,46 @@ test('viewPick renders a live image and degrades a dead-flagged one to its tinte
   assert.match(out, /Gone/, 'the degraded card still shows its name tile');
 });
 
-test('the image-error glue listens in capture phase and sets the volatile dead flag', () => {
-  const hStart = html.indexOf("document.addEventListener('error'");
-  assert.ok(hStart > 0, 'error listener found in index.html');
-  const hEnd = html.indexOf('}, true);', hStart);
-  assert.ok(hEnd > hStart, 'the error listener must use capture phase — error events do not bubble');
-  const live = html.slice(hStart, hEnd)
+test('markDeadImage flags the meal, removes the face and its shade by name, ignores non-card errors', () => {
+  state.meals = [{ id: 'm1', name: 'Steak', image_url: 'https://x/dead.jpg' }];
+  const removed = [];
+  const shade = { remove: () => removed.push('shade') };
+  const img = {
+    tagName: 'IMG',
+    closest: (sel) => (sel === '.meal-card[data-id]' ? { dataset: { id: 'm1' } } : null),
+    parentElement: { querySelector: (sel) => (sel === '.shade' ? shade : null) },
+    remove: () => removed.push('img'),
+  };
+  assert.equal(markDeadImage(img), true);
+  assert.equal(state.meals[0].imageDead, true);
+  assert.deepEqual(removed, ['shade', 'img'], 'exactly the shade and the image — never "whatever follows"');
+
+  state.meals = [{ id: 'm1' }];
+  assert.equal(markDeadImage({ tagName: 'SCRIPT' }), false, 'non-image errors are ignored');
+  assert.equal(markDeadImage({ tagName: 'IMG', closest: () => null }), false, 'images outside meal cards are ignored');
+  assert.equal(state.meals[0].imageDead, undefined);
+});
+
+test('reviveDeadImages clears every dead flag and reports whether any were set', () => {
+  state.meals = [{ id: 'a', imageDead: true }, { id: 'b' }, { id: 'c', imageDead: true }];
+  assert.equal(reviveDeadImages(), true);
+  assert.ok(state.meals.every((m) => !('imageDead' in m)));
+  assert.equal(reviveDeadImages(), false, 'nothing to revive → no render needed');
+});
+
+test('the image-error and online wiring: capture phase, and recovery on connectivity', () => {
+  const errStart = html.indexOf("document.addEventListener('error'");
+  assert.ok(errStart > 0, 'error listener found in index.html');
+  const errEnd = html.indexOf(', true);', errStart);
+  assert.ok(errEnd > errStart && errEnd - errStart < 200,
+    'the error listener must end in capture phase — error events do not bubble');
+  assert.match(html.slice(errStart, errEnd), /markDeadImage\(e\.target\)/);
+
+  const onStart = html.indexOf("window.addEventListener('online'");
+  const onEnd = html.indexOf('});', onStart);
+  assert.ok(onStart > 0 && onEnd > onStart, 'online listener found in index.html');
+  const onLive = html.slice(onStart, onEnd)
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/\/\/[^\n]*/g, '');
-  assert.match(live, /meal\.imageDead = true/);
+  assert.match(onLive, /reviveDeadImages\(\)/, 'coming back online must give dead images another chance');
 });

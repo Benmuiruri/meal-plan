@@ -163,4 +163,7 @@ test('seed meals are well-formed: unique names, bucket-shaped image names', () =
   const mains = SEED_MAINS.map((m) => m.name);
   assert.ok(mains.includes('Ugali + beef') && mains.includes('Ugali + mbuzi'),
     'the household-added ugali mains stay in the seed library');
+  // a live invariant, not a change detector: every breakfast ships with its
+  // photo — a seed row silently losing one is a regression
+  assert.ok(SEED_BREAKFASTS.every((m) => m.img), 'every breakfast ships with a photo');
 });

@@ -598,11 +598,14 @@ function budgetTone({ budget, remaining }) {
 // pins that the parser and the builder stay in agreement.
 const MEAL_IMAGES_PUBLIC = '/storage/v1/object/public/meal-images/';
 
-// PostgREST rejections carry a non-empty code (PGRST*, or a SQLSTATE like
-// 23505); postgrest-js maps a transport failure to code '' and a thrown
-// TypeError has none. Only a real code proves the server answered — and
-// therefore that a failed insert definitely wrote nothing.
-const isServerRejection = (err) => Boolean(err?.code);
+// Only code shapes PostgREST can emit prove the server answered — and
+// therefore that a failed insert definitely wrote nothing: PGRST*** or a
+// five-character SQLSTATE (23505, 42501…). postgrest-js forwards a transport
+// error's OWN code into the error it builds ('' for a bare TypeError, the
+// legacy 20 for an AbortError), so "truthy code" is NOT proof of a server
+// answer; the shape test is.
+const isServerRejection = (err) =>
+  typeof err?.code === 'string' && /^(PGRST\d+|[0-9A-Z]{5})$/.test(err.code);
 
 const db = {
   client: null,
@@ -769,6 +772,29 @@ const state = {
   saveStatus: 'saved',       // saved | saving | error
   saveErrorPermanent: false, // error subtype: permanent failures get Reload, not Retry
 };
+
+// A card photo that fails to load gets a volatile imageDead flag: re-renders
+// show the tinted tile instead of refiring the request. The flag is a claim
+// about the network as much as the URL, so connectivity returning clears it
+// and lets every degraded card try its photo again.
+function markDeadImage(imgEl) {
+  if (imgEl?.tagName !== 'IMG') return false;
+  const card = imgEl.closest('.meal-card[data-id]');
+  if (!card) return false;
+  const meal = state.meals.find((m) => m.id === card.dataset.id);
+  if (meal) meal.imageDead = true;
+  imgEl.parentElement?.querySelector('.shade')?.remove(); // the shade by name — never "whatever follows"
+  imgEl.remove();
+  return true;
+}
+
+function reviveDeadImages() {
+  let revived = false;
+  for (const m of state.meals) {
+    if (m.imageDead) { delete m.imageDead; revived = true; }
+  }
+  return revived;
+}
 
 const mealById = (id) => state.meals.find((m) => m.id === id);
 const mealName = (id) => mealById(id)?.name ?? '—';
@@ -1267,16 +1293,9 @@ document.addEventListener('click', (e) => {
 });
 
 // Error events don't bubble — capture phase is the only delegated way to
-// hear a card image 404. Mark the meal (volatile: the URL may work again
-// next session) so re-renders show the tinted tile instead of refetching.
-document.addEventListener('error', (e) => {
-  const card = e.target.tagName === 'IMG' && e.target.closest('.meal-card[data-id]');
-  if (!card) return;
-  const meal = state.meals.find((m) => m.id === card.dataset.id);
-  if (meal) meal.imageDead = true;
-  e.target.nextElementSibling?.remove();
-  e.target.remove();
-}, true);
+// hear a card image fail. markDeadImage does the state work and is tested
+// directly; this line is only the wiring.
+document.addEventListener('error', (e) => { markDeadImage(e.target); }, true);
 
 document.addEventListener('input', (e) => {
   const el = e.target;
@@ -1373,8 +1392,9 @@ document.addEventListener('submit', async (e) => {
       // Reclaim only on a server rejection: that proves the insert never
       // landed AND the connection is alive. A network unknown keeps the
       // object — the response may have been lost AFTER the row was written,
-      // and a rare orphan is cheaper than deleting a photo a live meal
-      // points at. Either way it's on the record, not silent.
+      // and deleting would break a photo a live meal points at. Accepted
+      // trade-off: a rare ~40KB orphan nobody sweeps, logged for whoever
+      // ever wonders; at that size the free tier holds ~25,000 of them.
       if (image_url && isServerRejection(err)) {
         db.removeMealImage(image_url).catch((e) => console.warn('meal image orphaned:', image_url, e));
       } else if (image_url) {
@@ -1413,7 +1433,12 @@ window.addEventListener('hashchange', () => {
   if (state.phase === 'ready') render();
 });
 
-window.addEventListener('online', () => { if (state.saveStatus === 'error') flushSave(); });
+window.addEventListener('online', () => {
+  if (state.saveStatus === 'error') flushSave();
+  // connectivity was the likely killer of any dead-flagged card photo —
+  // give them all another chance now
+  if (reviveDeadImages() && state.phase === 'ready') render();
+});
 
 // Flush a pending debounce as soon as the tab is backgrounded — the page is
 // still alive then, so the request usually completes; waiting for unload
