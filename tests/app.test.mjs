@@ -38,9 +38,9 @@ assert.ok(start > 0 && viewsBanner > start, 'section markers found in index.html
 const src = html.slice(start, viewsBanner) + `
 function render() {}
 function viewSaveErrorBanner() { const k = state.saveErrorPermanent ? 'permanent' : 'transient'; return '<banner data-kind="' + k + '">' + k + '</banner>'; }
-export { state, db, scheduleSave, flushSave, signIn };`;
+export { state, db, scheduleSave, flushSave, signIn, resizeImage };`;
 
-const { state, db, scheduleSave, flushSave, signIn } =
+const { state, db, scheduleSave, flushSave, signIn, resizeImage } =
   await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(src));
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -479,31 +479,103 @@ test('uploadMealImage surfaces storage failures', async () => {
   await assert.rejects(db.uploadMealImage({}), (err) => err.message === 'Payload too large');
 });
 
-test('the add-meal sheet offers a file upload, not a URL field', async () => {
+test('the add-meal sheet offers a labelled file upload, not a URL field, and re-emits a kept name escaped', async () => {
   const tmplStart = html.indexOf('function viewAddSheet');
   const tmplEnd = html.indexOf('/* ---------- Week');
   assert.ok(tmplStart > 0 && tmplEnd > tmplStart, 'add-sheet markers found in index.html');
   const escStart = html.indexOf('const esc =');
   const escEnd = html.indexOf('[c]));', escStart);
   const mod = await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(
-    `const state = { errorMsg: '' };
+    `const state = { errorMsg: '', addName: 'Kept <name>' };
      ${html.slice(escStart, escEnd + '[c]));'.length)}
      ${html.slice(tmplStart, tmplEnd)}
      export { viewAddSheet };`));
   const out = mod.viewAddSheet('main');
   assert.match(out, /type="file"/);
   assert.match(out, /accept="image\/\*"/);
+  assert.match(out, /Photo \(optional\)/, 'the hint is visible text, not only an aria-label');
+  assert.match(out, /value="Kept &lt;name&gt;"/, 'a failed add keeps the typed name, escaped');
   assert.doesNotMatch(out, /type="url"/, 'the pasted-URL field is gone');
 });
 
-test('the add-meal submit glue resizes then uploads before saving the meal', () => {
+test('the add-meal submit glue nests the calls: upload takes the resized file, failure keeps the name and reclaims the upload', () => {
   const hStart = html.indexOf("if (form.id === 'form-addmeal')");
   const hEnd = html.indexOf("if (form.id === 'form-additem')");
   assert.ok(hStart > 0 && hEnd > hStart, 'add-meal handler markers found in index.html');
   const live = html.slice(hStart, hEnd)
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/\/\/[^\n]*/g, '');
-  assert.match(live, /resizeImage\(/);
-  assert.match(live, /uploadMealImage\(/);
+  // nesting pins the order — upload receives resizeImage's awaited result,
+  // so the calls cannot be reordered or the inner await dropped
+  assert.match(live, /await db\.uploadMealImage\(await resizeImage\(file\)\)/);
   assert.match(live, /db\.addMeal\(/);
+  assert.match(live, /state\.addName = name/, 'a failed add must keep the typed name');
+  assert.match(live, /db\.removeMealImage\(image_url\)/, 'a failed add must reclaim its upload');
+});
+
+test('removeMealImage deletes the object named by its public url', async () => {
+  const removed = [];
+  db.client = { storage: { from: (bucket) => ({
+    remove: async (paths) => { removed.push({ bucket, paths }); return { data: null, error: null }; },
+  }) } };
+  await db.removeMealImage('https://x.supabase.co/storage/v1/object/public/meal-images/abc-123.jpg');
+  assert.deepEqual(removed, [{ bucket: 'meal-images', paths: ['abc-123.jpg'] }]);
+});
+
+// ── resizeImage ────────────────────────────────────────────────────────
+// Stub the canvas world: createImageBitmap decodes to a fixed size, the
+// canvas records its dimensions and toBlob arguments.
+async function withCanvasWorld({ w, h, blob = { type: 'image/jpeg' } }, run) {
+  const world = { canvas: null, toBlobArgs: null, closed: false, decoded: 0 };
+  globalThis.createImageBitmap = async () => {
+    world.decoded++;
+    return { width: w, height: h, close: () => { world.closed = true; } };
+  };
+  document.createElement = () => (world.canvas = {
+    width: 0, height: 0,
+    getContext: () => ({ drawImage: () => {} }),
+    toBlob: (cb, type, quality) => { world.toBlobArgs = { type, quality }; cb(blob); },
+  });
+  try { await run(world); } finally {
+    delete globalThis.createImageBitmap;
+    delete document.createElement;
+  }
+  return world;
+}
+
+test('resizeImage scales the longest edge to 400 — width for landscape, height for tall shots', async () => {
+  await withCanvasWorld({ w: 800, h: 600 }, async (world) => {
+    const out = await resizeImage({ size: 1000 });
+    assert.equal(world.canvas.width, 400);
+    assert.equal(world.canvas.height, 300);
+    assert.equal(world.toBlobArgs.type, 'image/jpeg');
+    assert.equal(out.type, 'image/jpeg');
+    assert.ok(world.closed, 'bitmap memory is released');
+  });
+  await withCanvasWorld({ w: 600, h: 6000 }, async (world) => {
+    await resizeImage({ size: 1000 });
+    assert.equal(world.canvas.width, 40, 'a tall screenshot must not stay 400px wide and huge');
+    assert.equal(world.canvas.height, 400);
+  });
+});
+
+test('resizeImage never upscales a small image', async () => {
+  await withCanvasWorld({ w: 300, h: 200 }, async (world) => {
+    await resizeImage({ size: 1000 });
+    assert.equal(world.canvas.width, 300);
+    assert.equal(world.canvas.height, 200);
+  });
+});
+
+test('resizeImage rejects a >20MB file before decoding it', async () => {
+  const world = await withCanvasWorld({ w: 800, h: 600 }, async () => {
+    await assert.rejects(resizeImage({ size: 21 * 1024 * 1024 }), /too large/);
+  });
+  assert.equal(world.decoded, 0, 'the oversized file must never reach createImageBitmap');
+});
+
+test('resizeImage fails loudly when the canvas cannot encode', async () => {
+  await withCanvasWorld({ w: 800, h: 600, blob: null }, async () => {
+    await assert.rejects(resizeImage({ size: 1000 }), /process/);
+  });
 });

@@ -148,6 +148,8 @@ h2.screen-title {
   background: #fff; font-size: 16px;
 }
 .field:focus { outline: 3px solid var(--mustard); outline-offset: 1px; }
+.field-file { display: flex; flex-direction: column; gap: 6px; cursor: pointer; }
+.field-file > span { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink-dim); }
 .btn-primary {
   width: 100%; padding: 13px;
   background: var(--tomato); color: var(--chalk);
@@ -416,16 +418,40 @@ const DAY_NAMES = { mon:'Monday', tue:'Tuesday', wed:'Wednesday', thu:'Thursday'
 const TINTS = ['#1B5B9E', '#E23E2C', '#2E7D46', '#F2B21B'];
 const PICK_TARGET = 7;
 
+// img names an object in the public meal-images Storage bucket, so a fresh
+// seed produces the same illustrated library that production carries.
 const SEED_MAINS = [
-  'Chapo + chicken stew', 'Rice biriani', 'Chapo + maini stew', 'Fish fillet',
-  'Meat balls', 'Tumbukiza + chapo', 'Steak', 'Pasta salad', 'Potato salad',
-  'Noodles', 'Matoke', 'Cheesy hot dogs',
+  { name: 'Chapo + chicken stew' },
+  { name: 'Rice biriani' },
+  { name: 'Chapo + maini stew' },
+  { name: 'Fish fillet' },
+  { name: 'Meat balls' },
+  { name: 'Tumbukiza + chapo' },
+  { name: 'Steak' },
+  { name: 'Pasta salad',   img: 'pasta-salad.jpg' },
+  { name: 'Potato salad' },
+  { name: 'Noodles' },
+  { name: 'Matoke',        img: 'matoke.jpg' },
+  { name: 'Cheesy hot dogs' },
+  { name: 'Ugali + beef',  img: 'ugali-beef.jpg' },
+  { name: 'Ugali + mbuzi', img: 'ugali-mbuzi.jpg' },
 ];
 const SEED_BREAKFASTS = [
-  'Weetabix', 'Fried egg + nduma + avocado', 'Oats', 'Uji + peanuts', 'Boiled maize + egg',
-  'Liver + vegetables', 'Mandizi + vegetables', 'Mushroom + scrambled', 'Bone soup + buns',
-  'Pumpkin soup + buns', 'Butter soup + buns', 'Smoothie + cake', 'Grape salad',
-  'Cornflakes + egg', 'Mbaazi + mahamri',
+  { name: 'Weetabix',                    img: 'weetabix.jpg' },
+  { name: 'Fried egg + nduma + avocado', img: 'fried-egg-nduma-avocado.jpg' },
+  { name: 'Oats',                        img: 'oats.jpg' },
+  { name: 'Uji + peanuts',               img: 'uji-peanuts.jpg' },
+  { name: 'Boiled maize + egg',          img: 'boiled-maize-egg.jpg' },
+  { name: 'Liver + vegetables',          img: 'mixed-vegetables.jpg' },
+  { name: 'Mandizi + vegetables',        img: 'mixed-vegetables.jpg' },
+  { name: 'Mushroom + scrambled',        img: 'mushroom-scrambled.jpg' },
+  { name: 'Bone soup + buns',            img: 'bone-soup-buns.jpg' },
+  { name: 'Pumpkin soup + buns',         img: 'pumpkin-soup-buns.jpg' },
+  { name: 'Butter soup + buns',          img: 'butter-soup-buns.jpg' },
+  { name: 'Smoothie + cake',             img: 'smoothie-cake.jpg' },
+  { name: 'Grape salad',                 img: 'grape-salad.jpg' },
+  { name: 'Cornflakes + egg',            img: 'cornflakes-egg.jpg' },
+  { name: 'Mbaazi + mahamri',            img: 'mbaazi-mahamri.jpg' },
 ];
 const SEED_STAPLES = [
   { name: 'Maize',        price: 50 },
@@ -470,13 +496,17 @@ function currentMonday() {
 
 const reducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-// A phone photo is 3–5MB; the card needs ~30–50KB. Downscale to 400px wide
+// A phone photo is 3–5MB; the card needs ~30–50KB. Downscale so the longest
+// edge fits 400px — width alone would let a tall screenshot through huge —
 // and re-encode as JPEG before anything leaves the device.
-async function resizeImage(file, maxW = 400) {
+async function resizeImage(file, maxEdge = 400) {
+  if (file.size > 20 * 1024 * 1024) {
+    throw new Error('that image is too large — 20MB max');
+  }
   const bmp = await createImageBitmap(file).catch(() => {
     throw new Error("couldn't read that image — try a JPEG or PNG");
   });
-  const scale = Math.min(1, maxW / bmp.width);
+  const scale = Math.min(1, maxEdge / Math.max(bmp.width, bmp.height));
   const canvas = document.createElement('canvas');
   canvas.width = Math.round(bmp.width * scale);
   canvas.height = Math.round(bmp.height * scale);
@@ -568,9 +598,10 @@ const db = {
   },
 
   async seedMeals(userId) {
+    const img = (f) => f ? `${CONFIG.SUPABASE_URL}/storage/v1/object/public/meal-images/${f}` : null;
     const rows = [
-      ...SEED_MAINS.map((name, i) => ({ user_id: userId, name, kind: 'main', tint: TINTS[i % TINTS.length] })),
-      ...SEED_BREAKFASTS.map((name, i) => ({ user_id: userId, name, kind: 'breakfast', tint: TINTS[(i + 2) % TINTS.length] })),
+      ...SEED_MAINS.map((m, i) => ({ user_id: userId, name: m.name, kind: 'main', tint: TINTS[i % TINTS.length], image_url: img(m.img) })),
+      ...SEED_BREAKFASTS.map((m, i) => ({ user_id: userId, name: m.name, kind: 'breakfast', tint: TINTS[(i + 2) % TINTS.length], image_url: img(m.img) })),
     ];
     const { data, error } = await this.client.from('meals').insert(rows).select();
     if (error) throw error;
@@ -648,6 +679,13 @@ const db = {
     if (error) throw error;
     return this.client.storage.from('meal-images').getPublicUrl(path).data.publicUrl;
   },
+
+  // Reclaims the object when the meal insert it was uploaded for fails.
+  async removeMealImage(publicUrl) {
+    const path = publicUrl.split('/meal-images/')[1];
+    if (!path) return;
+    await this.client.storage.from('meal-images').remove([path]);
+  },
 };
 
 // "JWT issued at future": a freshly minted access token can look post-dated
@@ -707,6 +745,7 @@ const state = {
   pickTab: 'mains',   // mains | breakfasts
   lifted: null,       // { slot: 'dinner'|'breakfast', day: 'mon' }
   addOpen: false,
+  addName: '',        // survives a failed add so only the photo needs re-picking
   saveStatus: 'saved',       // saved | saving | error
   saveErrorPermanent: false, // error subtype: permanent failures get Reload, not Retry
 };
@@ -913,8 +952,11 @@ function viewAddSheet(kind) {
     <div class="sheet" role="dialog" aria-label="Add a ${kind}">
       <h3>New ${kind}</h3>
       <form id="form-addmeal">
-        <input class="field" type="text" name="name" placeholder="Name" required maxlength="80" autocomplete="off">
-        <input class="field" type="file" name="image" accept="image/*" aria-label="Photo (optional)">
+        <input class="field" type="text" name="name" placeholder="Name" required maxlength="80" autocomplete="off" value="${esc(state.addName)}">
+        <label class="field field-file">
+          <span>Photo (optional)</span>
+          <input type="file" name="image" accept="image/*">
+        </label>
         <div class="row-btns">
           <button type="button" class="btn-quiet" data-action="close-add">Cancel</button>
           <button type="submit" class="btn-primary">Add</button>
@@ -1163,11 +1205,12 @@ const actions = {
 
   'open-add': () => {
     state.addOpen = true;
+    state.addName = '';
     state.errorMsg = '';
     render();
     $('#form-addmeal input[name="name"]')?.focus();
   },
-  'close-add': () => { state.addOpen = false; state.errorMsg = ''; render(); },
+  'close-add': () => { state.addOpen = false; state.addName = ''; state.errorMsg = ''; render(); },
 
   'lift': (el) => {
     const { day, slot } = el.dataset;
@@ -1281,14 +1324,19 @@ document.addEventListener('submit', async (e) => {
     const tint = TINTS[state.meals.length % TINTS.length];
     const file = form.image.files[0];
     form.querySelector('button[type="submit"]').disabled = true; // an upload takes a beat — no double adds
+    let image_url = null;
     try {
-      const image_url = file ? await db.uploadMealImage(await resizeImage(file)) : null;
+      image_url = file ? await db.uploadMealImage(await resizeImage(file)) : null;
       const meal = await db.addMeal(state.session.user.id, { name, kind, image_url, tint });
       state.meals.push(meal);
       state.addOpen = false;
+      state.addName = '';
       state.errorMsg = '';
     } catch (err) {
+      state.addName = name; // the file input can't be refilled, but the name can
       state.errorMsg = `Couldn't save: ${err.message ?? 'no connection'}`;
+      // an upload whose meal never landed would otherwise sit orphaned forever
+      if (image_url) db.removeMealImage(image_url).catch(() => {});
     }
     render();
   }

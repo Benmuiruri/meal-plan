@@ -96,7 +96,7 @@ Every change writes to the current week's row, debounced at 800ms so typing a pr
 
 ### Images
 
-Adding a meal takes a photo upload. The browser resizes it to a 400px-wide JPEG (roughly 30–50KB, well inside the 1GB free tier) before it leaves your phone, stores it under a fresh uuid in the public Storage bucket `meal-images` (bucket and policies live in `schema.sql`), and saves the public URL on the meal. The library's starting photos were bulk-loaded the same way (2026-08-06). An earlier revision took a pasted URL instead; that field is gone.
+Adding a meal takes a photo upload. The browser resizes it so its longest edge fits 400px and re-encodes as JPEG (roughly 30–50KB, well inside the 1GB free tier) before it leaves your phone, stores it under a fresh uuid in the public Storage bucket `meal-images` (bucket, 512KB/JPEG-only caps, and policies live in `schema.sql`), and saves the public URL on the meal. The library's starting photos were bulk-loaded the same way (2026-08-06). An earlier revision took a pasted URL instead; that field is gone.
 
 ---
 
@@ -159,7 +159,9 @@ Everything else stays quiet. Motion limited to slot-lift on swap and a count-up 
 
 Written on first sign-in, all editable, none permanent.
 
-**Mains (12)** — chapo + chicken stew, rice biriani, chapo + maini stew, fish fillet, meat balls, tumbukiza + chapo, steak, pasta salad, potato salad, noodles, matoke, cheesy hot dogs
+**Mains (14)** — chapo + chicken stew, rice biriani, chapo + maini stew, fish fillet, meat balls, tumbukiza + chapo, steak, pasta salad, potato salad, noodles, matoke, cheesy hot dogs, ugali + beef, ugali + mbuzi
+
+Seeds carry their photo where one exists (all breakfasts; pasta salad, matoke and the ugali dishes among mains), pointing at the public `meal-images` bucket — a fresh seed reproduces the same illustrated library production has.
 
 **Breakfasts (15)** — weetabix; fried egg + nduma + avocado; oats; uji + peanuts; boiled maize + egg; liver + vegetables; mandizi + vegetables; mushroom + scrambled; bone soup + buns; pumpkin soup + buns; butter soup + buns; smoothie + cake; grape salad; cornflakes + egg; mbaazi + mahamri
 
