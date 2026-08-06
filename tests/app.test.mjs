@@ -38,9 +38,9 @@ assert.ok(start > 0 && viewsBanner > start, 'section markers found in index.html
 const src = html.slice(start, viewsBanner) + `
 function render() {}
 function viewSaveErrorBanner() { const k = state.saveErrorPermanent ? 'permanent' : 'transient'; return '<banner data-kind="' + k + '">' + k + '</banner>'; }
-export { state, db, scheduleSave, flushSave, signIn, resizeImage };`;
+export { state, db, scheduleSave, flushSave, signIn, resizeImage, isServerRejection };`;
 
-const { state, db, scheduleSave, flushSave, signIn, resizeImage } =
+const { state, db, scheduleSave, flushSave, signIn, resizeImage, isServerRejection } =
   await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(src));
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -479,6 +479,23 @@ test('a public url from uploadMealImage round-trips through removeMealImage to t
   assert.deepEqual(db.client.removed[0].paths, [db.client.uploads[0].path]);
 });
 
+test('removeMealImage refuses a url it cannot parse instead of silently doing nothing', async () => {
+  db.client = fakeStorageClient();
+  await assert.rejects(db.removeMealImage('https://elsewhere.example/foo.jpg'), /not a meal-images/);
+  assert.equal(db.client.removed.length, 0);
+});
+
+// the reclaim gate: only a server rejection proves the insert wrote nothing
+test('isServerRejection separates coded rejections from transport unknowns', () => {
+  assert.equal(isServerRejection({ code: 'PGRST301' }), true);
+  assert.equal(isServerRejection({ code: '23505' }), true);      // SQLSTATE from a constraint
+  // postgrest-js maps a fetch failure to code: '' — the response may have
+  // been lost after the row was written, so this must NOT count
+  assert.equal(isServerRejection({ code: '', message: 'TypeError: Failed to fetch' }), false);
+  assert.equal(isServerRejection(new TypeError('Failed to fetch')), false);
+  assert.equal(isServerRejection(undefined), false);
+});
+
 test('uploadMealImage generates a fresh path per call — a retried upload cannot collide', async () => {
   db.client = fakeStorageClient();
   await db.uploadMealImage({});
@@ -525,8 +542,9 @@ test('the add-meal submit glue nests the calls: upload takes the resized file, f
   assert.match(live, /state\.addName = name/, 'a failed add must keep the typed name');
   // reclaim is gated on a structured rejection: a network unknown may mean
   // the row WAS written, and deleting then breaks a live meal's image
-  assert.match(live, /if \(image_url && err\?\.code\)/, 'reclaim must require a server rejection code');
+  assert.match(live, /if \(image_url && isServerRejection\(err\)\)/, 'reclaim must go through the tested discriminator');
   assert.match(live, /db\.removeMealImage\(image_url\)/, 'a failed add must reclaim its upload');
+  assert.match(live, /console\.info\('meal image kept/, 'a kept-unknown object goes on the record');
 });
 
 test('removeMealImage deletes the object named by its public url', async () => {
@@ -607,4 +625,39 @@ test('resizeImage fails loudly when the canvas cannot encode', async () => {
   await withCanvasWorld({ w: 800, h: 600, blob: null }, async () => {
     await assert.rejects(resizeImage({ size: 1000 }), /process/);
   });
+});
+
+test('viewPick renders a live image and degrades a dead-flagged one to its tinted tile', async () => {
+  const tmplStart = html.indexOf('function viewPick');
+  const tmplEnd = html.indexOf('function viewAddSheet');
+  assert.ok(tmplStart > 0 && tmplEnd > tmplStart, 'viewPick markers found in index.html');
+  const escStart = html.indexOf('const esc =');
+  const escEnd = html.indexOf('[c]));', escStart);
+  const mod = await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(
+    `const PICK_TARGET = 7;
+     const TINTS = ['#111'];
+     const state = { pickTab: 'mains', addOpen: false,
+       week: { picks: { mains: [], breakfasts: [] } },
+       meals: [
+         { id: 'm1', kind: 'main', name: 'Alive', tint: '#123', image_url: 'https://x/live.jpg' },
+         { id: 'm2', kind: 'main', name: 'Gone', tint: '#123', image_url: 'https://x/dead.jpg', imageDead: true },
+       ] };
+     ${html.slice(escStart, escEnd + '[c]));'.length)}
+     ${html.slice(tmplStart, tmplEnd)}
+     export { viewPick };`));
+  const out = mod.viewPick();
+  assert.match(out, /src="https:\/\/x\/live\.jpg"/);
+  assert.doesNotMatch(out, /dead\.jpg/, 'a dead-flagged image must not be re-requested on re-render');
+  assert.match(out, /Gone/, 'the degraded card still shows its name tile');
+});
+
+test('the image-error glue listens in capture phase and sets the volatile dead flag', () => {
+  const hStart = html.indexOf("document.addEventListener('error'");
+  assert.ok(hStart > 0, 'error listener found in index.html');
+  const hEnd = html.indexOf('}, true);', hStart);
+  assert.ok(hEnd > hStart, 'the error listener must use capture phase — error events do not bubble');
+  const live = html.slice(hStart, hEnd)
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/[^\n]*/g, '');
+  assert.match(live, /meal\.imageDead = true/);
 });

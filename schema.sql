@@ -81,7 +81,8 @@ create trigger weeks_set_updated_at
 insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
 values ('meal-images', 'meal-images', true, 524288, array['image/jpeg'])
 on conflict (id) do update
-  set file_size_limit = excluded.file_size_limit,
+  set public = excluded.public,
+      file_size_limit = excluded.file_size_limit,
       allowed_mime_types = excluded.allowed_mime_types;
 
 drop policy if exists "anyone can view meal images" on storage.objects;

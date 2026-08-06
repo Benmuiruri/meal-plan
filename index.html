@@ -592,9 +592,17 @@ function budgetTone({ budget, remaining }) {
 /* ================================================================
    5. DATA LAYER — every Supabase call lives here
    ================================================================ */
-// The one spelling of the bucket's public URL shape: seeding builds with it,
-// removeMealImage parses with it, and a test pins that getPublicUrl agrees.
+// The one spelling of the bucket's public URL shape. Seeding builds with it
+// and removeMealImage parses with it; supabase-js's getPublicUrl emits the
+// same shape (storage base + /object/public/<bucket>/<path>), and a test
+// pins that the parser and the builder stay in agreement.
 const MEAL_IMAGES_PUBLIC = '/storage/v1/object/public/meal-images/';
+
+// PostgREST rejections carry a non-empty code (PGRST*, or a SQLSTATE like
+// 23505); postgrest-js maps a transport failure to code '' and a thrown
+// TypeError has none. Only a real code proves the server answered — and
+// therefore that a failed insert definitely wrote nothing.
+const isServerRejection = (err) => Boolean(err?.code);
 
 const db = {
   client: null,
@@ -695,7 +703,7 @@ const db = {
   // Reclaims the object when the meal insert it was uploaded for fails.
   async removeMealImage(publicUrl) {
     const path = publicUrl.split(MEAL_IMAGES_PUBLIC)[1];
-    if (!path) return;
+    if (!path) throw new Error(`not a meal-images public url: ${publicUrl}`);
     await this.client.storage.from('meal-images').remove([path]);
   },
 };
@@ -938,11 +946,11 @@ function viewPick() {
       <div class="pick-grid">
         ${cards.map((m) => {
           const isPicked = picked.includes(m.id);
-          // onerror: a dead image URL degrades to the tinted name tile
-          // instead of a permanently blank face (error events don't bubble,
-          // so the delegated listeners can't cover this)
-          const face = m.image_url
-            ? `<img src="${esc(m.image_url)}" alt="" loading="lazy" onerror="this.nextElementSibling?.remove();this.remove()"><span class="shade"></span>`
+          // imageDead is a volatile per-session flag set by the capture-phase
+          // error listener: a dead URL degrades to the tinted name tile and
+          // stays degraded — re-renders must not refire the failed request
+          const face = m.image_url && !m.imageDead
+            ? `<img src="${esc(m.image_url)}" alt="" loading="lazy"><span class="shade"></span>`
             : '';
           return `
             <button type="button" class="meal-card ${isPicked ? 'is-picked' : ''}"
@@ -1258,6 +1266,18 @@ document.addEventListener('click', (e) => {
   if (el) actions[el.dataset.action]?.(el);
 });
 
+// Error events don't bubble — capture phase is the only delegated way to
+// hear a card image 404. Mark the meal (volatile: the URL may work again
+// next session) so re-renders show the tinted tile instead of refetching.
+document.addEventListener('error', (e) => {
+  const card = e.target.tagName === 'IMG' && e.target.closest('.meal-card[data-id]');
+  if (!card) return;
+  const meal = state.meals.find((m) => m.id === card.dataset.id);
+  if (meal) meal.imageDead = true;
+  e.target.nextElementSibling?.remove();
+  e.target.remove();
+}, true);
+
 document.addEventListener('input', (e) => {
   const el = e.target;
   if (el.dataset.input === 'budget') {
@@ -1350,13 +1370,15 @@ document.addEventListener('submit', async (e) => {
     } catch (err) {
       state.addName = name; // the file input can't be refilled, but the name can
       state.errorMsg = `Couldn't save: ${err.message ?? 'no connection'}`;
-      // Reclaim only on a structured server rejection (it carries a code):
-      // that proves the insert never landed AND the connection is alive. A
-      // network unknown keeps the object — the response may have been lost
-      // AFTER the row was written, and a rare orphan is cheaper than
-      // deleting a photo a live meal points at.
-      if (image_url && err?.code) {
+      // Reclaim only on a server rejection: that proves the insert never
+      // landed AND the connection is alive. A network unknown keeps the
+      // object — the response may have been lost AFTER the row was written,
+      // and a rare orphan is cheaper than deleting a photo a live meal
+      // points at. Either way it's on the record, not silent.
+      if (image_url && isServerRejection(err)) {
         db.removeMealImage(image_url).catch((e) => console.warn('meal image orphaned:', image_url, e));
+      } else if (image_url) {
+        console.info('meal image kept, insert outcome unknown:', image_url);
       }
     }
     render();
