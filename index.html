@@ -970,15 +970,8 @@ async function performSaveWeek(todayMonday, waitCeilingMs = 15000) {
       await new Promise((r) => setTimeout(r, 50));
     }
     if (state.saveStatus === 'saving') {
-      // ceiling elapsed with the request still in flight — the chip must
-      // not read "Saving" forever. Declare the sync failed as a TRANSIENT
-      // failure: a slow request is by definition not a data-shape problem,
-      // and if the straggler underneath really is retrying a permanent
-      // failure, its own completion re-declares that within moments —
-      // whereas a stale permanent flag would paint the data-loss Reload
-      // banner over a request that is merely slow. A save-week re-entry
-      // exits here at once instead of freezing another full ceiling.
-      state.saveErrorPermanent = false;
+      // ceiling elapsed, request still in flight: stop the chip reading
+      // "Saving" forever; the failure class stays as last actually observed
       setSaveStatus('error');
     }
     if (state.saveStatus !== 'saved') return { outcome: 'dirty' };
@@ -1531,12 +1524,10 @@ const actions = {
       return;
     }
     render();
-    // dirty gets NO dialog: the header chip and the save banner already
-    // say exactly what is wrong and what to do — transient failures show
-    // Retry, permanent ones show Reload, a slow request shows Not saved
-    // until its straggler settles. A second voice here can only contradict
-    // whichever of those is on screen.
-    if (outcome === 'save-failed') {
+    if (outcome === 'dirty') {
+      // fact only, no advice — remediation lives with the chip and banner
+      alert("The week wasn't saved — your latest changes haven't reached Supabase yet.");
+    } else if (outcome === 'save-failed') {
       alert(`Couldn't save the week: ${error?.message ?? 'refused'}. Nothing was changed — try again.`);
     }
   },

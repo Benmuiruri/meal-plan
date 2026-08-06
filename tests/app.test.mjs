@@ -848,11 +848,11 @@ test('the quiescence wait has a ceiling — a hung pipeline exits dirty with an 
   db.client = fakeWeeksReader({ latest: { id: 'w1', status: 'saved', week_start: '2026-08-03' }, hang: 1 });
   scheduleSave();                          // status → 'saving'
   const inflight = flushSave();            // hangs until release()
-  state.saveErrorPermanent = true;         // stale flag from an older failure
+  state.saveErrorPermanent = true;         // last observed failure was permanent
   const result = await performSaveWeek('2026-08-03', 120);
   assert.equal(result.outcome, 'dirty');
-  assert.equal(state.saveStatus, 'error', 'the chip must not read "Saving" forever — and the Retry banner needs error');
-  assert.equal(state.saveErrorPermanent, false, 'a slow request is transient — never the data-loss Reload banner');
+  assert.equal(state.saveStatus, 'error', 'the chip must not read "Saving" forever');
+  assert.equal(state.saveErrorPermanent, true, 'the ceiling reports staleness, it does not invent a failure class');
   assert.ok(!db.client.log.includes('flip-status'));
   // a re-entry while the request is still hung must exit at once, not
   // freeze the screen for another full ceiling
@@ -973,9 +973,9 @@ test('the save-week action gates the UI for the duration and maps every outcome'
   // messages are pinned INSIDE their branches — swapping them fails
   assert.match(live, /outcome === 'save-unknown'\s*\? "Couldn't confirm whether the week was saved/);
   assert.match(live, /: 'The week was saved, but starting the next one failed/);
-  // dirty deliberately has no dialog — the chip and banner are the single
-  // truthful voice for every failure class
-  assert.doesNotMatch(live, /outcome === 'dirty'/, 'no second voice contradicting the banner');
+  // dirty states the fact and nothing else — advice is the banner's job
+  assert.match(live, /outcome === 'dirty'\)[\s\S]{0,160}?alert\("The week wasn't saved/,
+    'an explicitly invoked action must acknowledge its failure');
   assert.match(live, /outcome === 'save-failed'\)[\s\S]{0,80}?error\?\.message/, 'the rejection reason reaches the user');
   // done must not rely on a hashchange event that an equal hash never fires
   // — anchored to the done branch AND covering all four statements in order
