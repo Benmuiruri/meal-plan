@@ -700,3 +700,148 @@ test('the image-error and online wiring: capture phase, and recovery on connecti
     .replace(/\/\/[^\n]*/g, '');
   assert.match(onLive, /reviveDeadImages\(\)/, 'coming back online must give dead images another chance');
 });
+
+// ── save-the-week & history ────────────────────────────────────────────
+// fake for the weeks-table read paths loadActiveWeek/listSavedWeeks use
+function fakeWeeksReader({ latest = null, saved = [], failWith = null } = {}) {
+  const inserts = [];
+  const filters = [];
+  return {
+    inserts,
+    filters,
+    from() {
+      const b = {
+        op: 'select',
+        select: () => b, limit: () => b, maybeSingle: () => b, single: () => b,
+        eq: (col, val) => { filters.push(['eq', col, val]); return b; },
+        order: (col, opts) => { filters.push(['order', col, opts?.ascending]); return b; },
+        insert(payload) { b.op = 'insert'; inserts.push(payload); return b; },
+        async then(resolve) {
+          if (failWith) return resolve({ data: null, error: failWith });
+          if (b.op === 'insert') {
+            return resolve({ data: { id: 'new-week', status: 'draft', ...inserts[inserts.length - 1] }, error: null });
+          }
+          resolve({ data: filters.some((f) => f[0] === 'eq') ? saved : latest, error: null });
+        },
+      };
+      return b;
+    },
+  };
+}
+
+test('loadActiveWeek resumes the newest draft no matter how stale', async () => {
+  const draft = { id: 'w9', status: 'draft', week_start: '2026-06-01' };
+  db.client = fakeWeeksReader({ latest: draft });
+  assert.equal(await db.loadActiveWeek('u1', '2026-08-03'), draft);
+  assert.equal(db.client.inserts.length, 0, 'an old draft is resumed, never replaced');
+});
+
+test('loadActiveWeek after a mid-week save starts the following Monday', async () => {
+  db.client = fakeWeeksReader({ latest: { id: 'w1', status: 'saved', week_start: '2026-08-03' } });
+  const week = await db.loadActiveWeek('u1', '2026-08-03');
+  assert.deepEqual(db.client.inserts, [{ user_id: 'u1', week_start: '2026-08-10' }]);
+  assert.equal(week.status, 'draft');
+});
+
+test('loadActiveWeek after a stale save jumps to the current Monday', async () => {
+  db.client = fakeWeeksReader({ latest: { id: 'w1', status: 'saved', week_start: '2026-07-06' } });
+  await db.loadActiveWeek('u1', '2026-08-03');
+  assert.deepEqual(db.client.inserts, [{ user_id: 'u1', week_start: '2026-08-03' }]);
+});
+
+test('loadActiveWeek with no weeks at all starts the current Monday', async () => {
+  db.client = fakeWeeksReader({ latest: null });
+  await db.loadActiveWeek('u1', '2026-08-03');
+  assert.deepEqual(db.client.inserts, [{ user_id: 'u1', week_start: '2026-08-03' }]);
+});
+
+test('markWeekSaved flips exactly the status, and fails loudly on a vanished row', async () => {
+  db.client = fakeWeeksClient();
+  await db.markWeekSaved('w1');
+  assert.deepEqual(db.client.ops('update')[0].payload, { status: 'saved' });
+
+  db.client = fakeWeeksClient({ matchedRows: [] });
+  await assert.rejects(db.markWeekSaved('w1'), /missing/);
+});
+
+test('listSavedWeeks asks for saved rows newest first', async () => {
+  const rows = [{ id: 'a', week_start: '2026-08-03' }];
+  db.client = fakeWeeksReader({ saved: rows });
+  assert.equal(await db.listSavedWeeks(), rows);
+  assert.deepEqual(db.client.filters, [['eq', 'status', 'saved'], ['order', 'week_start', false]]);
+});
+
+test('the save-week glue flushes first, gates on a clean save, and invalidates the history cache', () => {
+  const hStart = html.indexOf("'save-week':");
+  const hEnd = html.indexOf("'retry-history':");
+  assert.ok(hStart > 0 && hEnd > hStart, 'save-week handler markers found in index.html');
+  const live = html.slice(hStart, hEnd)
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/[^\n]*/g, '');
+  assert.match(live, /await flushSave\(\)/);
+  assert.match(live, /state\.saveStatus !== 'saved'/, 'a failed sync must block freezing the week');
+  assert.match(live, /markWeekSaved\(state\.week\.id\)/);
+  assert.match(live, /state\.history = null/, 'the cached list is stale once a week is saved');
+  assert.match(live, /loadActiveWeek\(/);
+});
+
+// ── history templates, executed with the real domain slice ────────────
+const viewsStart = html.indexOf('function viewTotals');
+const viewsEnd = html.indexOf('/* ---------- root');
+assert.ok(viewsStart > 0 && viewsEnd > viewsStart, 'summary/history view markers found in index.html');
+const domStart = html.indexOf('const DAY_KEYS');
+const domEnd = html.lastIndexOf('/* =', html.indexOf('5. DATA LAYER'));
+const viewsMod = await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(`
+  ${html.slice(domStart, domEnd)}
+  const state = { week: null, history: null, historyError: '', historyDetail: null };
+  const mealName = (id) => id ? 'MEAL-' + id : '—';
+  ${html.slice(viewsStart, viewsEnd)}
+  export { state as vstate, viewSummary, viewHistory, viewHistoryDetail };`));
+
+const fullWeek = (over = {}) => {
+  const ids = (n, p) => Array.from({ length: n }, (_, i) => p + i);
+  const days = {};
+  ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'].forEach((k, i) => {
+    days[k] = { breakfast: 'b' + i, dinner: 'm' + i };
+  });
+  return {
+    id: 'w1', week_start: '2026-07-27', budget: 1000, status: 'saved',
+    picks: { mains: ids(7, 'm'), breakfasts: ids(7, 'b') }, days,
+    groceries: [{ id: 'g1', name: 'Eggs', price: 300, checked: true }],
+    ...over,
+  };
+};
+
+test('the summary offers Save this week only once the menu is complete', () => {
+  viewsMod.vstate.week = fullWeek({ status: 'draft' });
+  assert.match(viewsMod.viewSummary(), /data-action="save-week"/);
+  viewsMod.vstate.week = fullWeek({ status: 'draft', picks: { mains: [], breakfasts: [] } });
+  assert.doesNotMatch(viewsMod.viewSummary(), /data-action="save-week"/, 'a barely-started week cannot be frozen');
+});
+
+test('the history list walks loading, empty, and rows states', () => {
+  viewsMod.vstate.historyDetail = null;
+  viewsMod.vstate.history = null;
+  assert.match(viewsMod.viewHistory(), /Loading…/);
+  viewsMod.vstate.history = [];
+  assert.match(viewsMod.viewHistory(), /No saved weeks yet/);
+  viewsMod.vstate.history = [fullWeek()];
+  const out = viewsMod.viewHistory();
+  assert.match(out, /href="#\/history\/2026-07-27"/);
+  assert.match(out, /Week of 27 Jul 2026/);
+  assert.match(out, /300 \/ 1,000/, 'spend against budget, at a glance');
+});
+
+test('the history detail is read-only and totals the week it shows', () => {
+  viewsMod.vstate.history = [fullWeek()];
+  viewsMod.vstate.historyDetail = '2026-07-27';
+  const out = viewsMod.viewHistory();
+  assert.match(out, /Week of 2026-07-27/);
+  assert.match(out, /MEAL-m3/, 'the board resolves meal names');
+  assert.doesNotMatch(out, /data-change="tick"/, 'no live checkboxes in a record');
+  assert.doesNotMatch(out, /data-action="save-week"/);
+  assert.match(out, /KSh 700/, 'remaining is computed from THAT week');
+  assert.match(out, /href="#\/history"/, 'a way back to the list');
+  viewsMod.vstate.historyDetail = '1999-01-04';
+  assert.match(viewsMod.viewHistory(), /No saved week for that date/);
+});

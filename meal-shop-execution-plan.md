@@ -102,7 +102,7 @@ Adding a meal takes a photo upload. The browser downscales it to a 0.12-megapixe
 
 ## 6. Screens
 
-Bottom tab bar, four tabs, hash routing so your phone's back button behaves.
+Bottom tab bar, five tabs, hash routing so your phone's back button behaves.
 
 ### Sign in
 Email and password, one button. The single household account is pre-created in Supabase — there is no sign-up flow in the app. On first-ever sign-in the app seeds your library and staples, so you land on a full Pick screen rather than an empty one. The session persists per device.
@@ -120,12 +120,12 @@ Tap a dinner to lift it, tap another to trade — default lunches shift with the
 ### Budget
 Amount at top: *"To spend this week."*
 
-Then your staples — fruits included, a row like any other — each a tick and an editable price prefilled from last time. Below, **Add an item** for anything off-list. Editing a staple's price updates its remembered value for next week. Amounts are typed, never nudged: number inputs carry no spinner arrows.
+Then your staples — fruits included, a row like any other — each a tick and a price you type for the week (quantities change weekly, so prices are entered fresh rather than remembered; §12 item 8). Below, **Add an item** for anything off-list. Amounts are typed, never nudged: number inputs carry no spinner arrows.
 
 Sticky footer, always visible: total, then remaining in large mono numerals. Green while there's room, amber inside the last 10%, red and negative past zero.
 
 ### Summary
-The single page you shop from. Week table, grocery list with prices, total against budget. **Save this week** flips the row to `saved` and opens a fresh draft.
+The single page you shop from. Week table, grocery list with prices, total against budget. **Save this week** (shown once the menu is complete) flips the row to `saved` and starts the next draft — the following Monday if the saved week was current, the coming Monday if it had gone stale. Pending edits flush first; a failed sync blocks the save rather than freezing stale data as the record.
 
 ### History
 Saved weeks newest first — date, spend, budget. Tap for that week's summary, read-only.
@@ -174,8 +174,8 @@ Seeds carry their photo where one exists (all breakfasts; pasta salad, matoke an
 **Phase 1 — usable end to end.**
 Supabase schema, magic link sign-in, seeding, save-failure handling, design tokens, nav, Pick, Week with swapping, Budget, Summary. Images by pasted URL. You can plan a real week and deploy the same day.
 
-**Phase 2 — the rest of the promise.**
-Staple price memory, save to history, History screen. (Photo upload to Storage shipped early, 2026-08-06.)
+**Phase 2 — the rest of the promise. Done 2026-08-06.**
+Save to history and the History screen (a fifth tab). Photo upload to Storage shipped a day early. Staple price memory was dropped, not deferred — §12 item 8.
 
 **Phase 3 — polish.**
 Library editing and archiving, delete a saved week, keyboard focus states, web manifest so it installs to your home screen with a proper icon.
@@ -214,3 +214,5 @@ The sequence matters — auth emails (password resets) need to know your live UR
 5. Sign-in — **one shared household account with a password**, replacing magic links. Two people, one plan: separate accounts would mean separate RLS-scoped datasets. The account is pre-created in Supabase (no sign-up flow in the app); credentials live with the household, never in this repo.
 6. First-use feedback (same day): tabs renamed **Choose meals** and **Menu**; lunch became an editable free-text line defaulting to yesterday's dinner; the *Fruits — whatever's left* remainder toggle was dropped for a plain Fruits staple; number inputs lost their spinner arrows; the beans row lost its `1kg` unit tag (units are no longer shown anywhere).
 7. Images (2026-08-06) — **upload, not URL**. The add-meal sheet takes a photo file, resized in-browser to 400px JPEG and stored in the public `meal-images` bucket. The household's downloaded photos were bulk-loaded and linked: all 15 breakfasts, plus pasta salad, matoke, and two new mains **Ugali + beef** and **Ugali + mbuzi**; "Nwaci + egg + avocado" was renamed **"Fried egg + nduma + avocado"**. The vegetables photo is shared by both vegetable combos. Remaining mains keep coloured tiles until photos are added.
+8. Staple price memory (2026-08-06) — **dropped, not deferred**. Quantities bought change week to week, so remembered prices would mislead more than help; prices are typed fresh each week. Ticking a staple still prefills its seed default as a starting hint.
+9. History (2026-08-06) — **fifth tab**, resolving where the History screen lives. The active week is the newest `weeks` row: a draft is resumed no matter how stale (saving is the household's ritual, not the calendar's), and saving starts the next draft per the Summary section.

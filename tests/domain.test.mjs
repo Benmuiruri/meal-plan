@@ -16,13 +16,13 @@ assert.ok(start > 0 && dataLayerBanner > start, 'section markers found in index.
 
 const src = html.slice(start, dataLayerBanner) + `
 export { DAY_KEYS, PICK_TARGET, SEED_MAINS, SEED_BREAKFASTS, parseMoney,
-         currentMonday, picksComplete, reconcileDays, swapSlots, lunchFor,
-         computeTotals, budgetTone };`;
+         currentMonday, addDays, nextDraftStart, currentRoute, picksComplete,
+         reconcileDays, swapSlots, lunchFor, computeTotals, budgetTone };`;
 
 const {
   DAY_KEYS, PICK_TARGET, SEED_MAINS, SEED_BREAKFASTS, parseMoney,
-  currentMonday, picksComplete, reconcileDays, swapSlots, lunchFor,
-  computeTotals, budgetTone,
+  currentMonday, addDays, nextDraftStart, currentRoute, picksComplete,
+  reconcileDays, swapSlots, lunchFor, computeTotals, budgetTone,
 } = await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(src));
 
 const week = (over = {}) => ({
@@ -121,6 +121,31 @@ test('reconcileDays carries lunch overrides through a picks reshuffle', () => {
   const days = reconcileDays(picks, existing);
   assert.equal(days.mon.lunch, 'Samosas');   // override survives the dinner being dropped
   assert.equal(days.tue.lunch, undefined);   // no override invented for other days
+});
+
+test('addDays crosses month and year boundaries', () => {
+  assert.equal(addDays('2026-08-03', 7), '2026-08-10');
+  assert.equal(addDays('2026-12-28', 7), '2027-01-04');
+  assert.equal(addDays('2026-02-23', 7), '2026-03-02');
+});
+
+test('nextDraftStart: a mid-week save plans the following Monday, a stale save jumps to the current one', () => {
+  assert.equal(nextDraftStart('2026-08-03', '2026-08-03'), '2026-08-10'); // saved its own week
+  assert.equal(nextDraftStart('2026-07-06', '2026-08-03'), '2026-08-03'); // a month idle in between
+  assert.equal(nextDraftStart('2026-08-03', '2026-08-10'), '2026-08-10'); // saved exactly one week behind
+});
+
+test('currentRoute parses the history detail and falls back to pick', () => {
+  const withHash = (h) => {
+    globalThis.location = { hash: h };
+    try { return currentRoute(); } finally { delete globalThis.location; }
+  };
+  assert.deepEqual(withHash('#/history'), { route: 'history', detail: null });
+  assert.deepEqual(withHash('#/history/2026-08-03'), { route: 'history', detail: '2026-08-03' });
+  assert.deepEqual(withHash('#/budget'), { route: 'budget', detail: null });
+  assert.deepEqual(withHash('#/budget/2026-08-03'), { route: 'budget', detail: null }, 'detail is a history-only concept');
+  assert.deepEqual(withHash('#/nope'), { route: 'pick', detail: null });
+  assert.deepEqual(withHash(''), { route: 'pick', detail: null });
 });
 
 test('computeTotals ignores null prices and rounds to cents', () => {

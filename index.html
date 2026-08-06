@@ -354,6 +354,17 @@ input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; marg
 }
 .add-item button:disabled { opacity: 0.4; }
 
+.save-week-btn { width: 100%; margin-top: 18px; }
+
+.hist-back { display: inline-block; margin: 2px 0 10px; font-weight: 700; color: var(--blue); }
+.hist-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 14px 4px; border-bottom: 1px solid var(--line);
+  color: var(--ink); font-weight: 500;
+}
+.hist-row .money { color: var(--ink-dim); }
+.tick-static { width: 26px; flex-shrink: 0; text-align: center; color: var(--leaf); font-weight: 700; }
+
 .totals {
   position: fixed; left: 0; right: 0; bottom: var(--tabbar-h); z-index: 29;
   background: var(--ink); color: var(--chalk);
@@ -494,6 +505,26 @@ function currentMonday() {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
+function addDays(iso, n) {
+  const d = new Date(iso + 'T00:00:00Z');
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+
+const fmtDate = (iso) => new Date(iso + 'T00:00:00Z')
+  .toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' });
+
+/* ---------- routing — hash-based so the phone's back button behaves ---------- */
+const ROUTES = ['pick', 'week', 'budget', 'summary', 'history'];
+
+// '#/history/2026-08-10' → { route: 'history', detail: '2026-08-10' };
+// anything unroutable falls back to the pick screen
+function currentRoute() {
+  const m = location.hash.match(/^#\/(\w+)(?:\/([\d-]+))?/);
+  const route = ROUTES.includes(m?.[1]) ? m[1] : 'pick';
+  return { route, detail: route === 'history' ? m?.[2] ?? null : null };
+}
+
 const reducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 // A phone photo is 3–5MB; the card needs ~30–50KB. Downscale to a pixel
@@ -589,6 +620,13 @@ function budgetTone({ budget, remaining }) {
   return 'green';
 }
 
+// The draft that follows a saved week: the week after it when saved on time,
+// the coming Monday when the saved week had gone stale in between.
+function nextDraftStart(savedStart, todayMonday) {
+  const following = addDays(savedStart, 7);
+  return following > todayMonday ? following : todayMonday; // ISO compares lexically
+}
+
 /* ================================================================
    5. DATA LAYER — every Supabase call lives here
    ================================================================ */
@@ -640,15 +678,33 @@ const db = {
     return data;
   },
 
-  async ensureWeek(userId, weekStart) {
-    const found = await this.client.from('weeks').select('*')
-      .eq('week_start', weekStart).maybeSingle();
-    if (found.error) throw found.error;
-    if (found.data) return found.data;
+  // The active week is always the newest row: a draft is resumed no matter
+  // how stale (saving it is the user's ritual, not the calendar's), and a
+  // saved newest row means the next draft starts — see nextDraftStart.
+  async loadActiveWeek(userId, todayMonday) {
+    const latest = await this.client.from('weeks').select('*')
+      .order('week_start', { ascending: false }).limit(1).maybeSingle();
+    if (latest.error) throw latest.error;
+    if (latest.data && latest.data.status === 'draft') return latest.data;
+    const start = latest.data ? nextDraftStart(latest.data.week_start, todayMonday) : todayMonday;
     const created = await this.client.from('weeks')
-      .insert({ user_id: userId, week_start: weekStart }).select().single();
+      .insert({ user_id: userId, week_start: start }).select().single();
     if (created.error) throw created.error;
     return created.data;
+  },
+
+  async markWeekSaved(weekId) {
+    const { data, error } = await this.client.from('weeks')
+      .update({ status: 'saved' }).eq('id', weekId).select('id');
+    if (error) throw error;
+    if (!data || data.length === 0) throw new Error('week row missing — reload and try again');
+  },
+
+  async listSavedWeeks() {
+    const { data, error } = await this.client.from('weeks').select('*')
+      .eq('status', 'saved').order('week_start', { ascending: false });
+    if (error) throw error;
+    return data;
   },
 
   async saveWeek(week) {
@@ -769,6 +825,9 @@ const state = {
   lifted: null,       // { slot: 'dinner'|'breakfast', day: 'mon' }
   addOpen: false,
   addName: '',        // survives a failed add so only the photo needs re-picking
+  history: null,      // saved weeks, newest first; null until first visit loads them
+  historyError: '',
+  historyDetail: null, // week_start of the open read-only week, from the hash
   saveStatus: 'saved',       // saved | saving | error
   saveErrorPermanent: false, // error subtype: permanent failures get Reload, not Retry
 };
@@ -878,6 +937,7 @@ const ICONS = {
   week: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="3.5" y="5" width="17" height="15.5" rx="2"/><path d="M3.5 10h17M8 2.5V6M16 2.5V6"/></svg>',
   budget: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="3" y="7" width="18" height="13" rx="2"/><path d="M16.5 13.5h.01M3 7l13-3.6L17.5 7"/></svg>',
   summary: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M6 3.5h12V21l-2.4-1.7L13.2 21l-2.4-1.7L8.4 21 6 19.3z"/><path d="M9.5 8.5h5M9.5 12.5h5"/></svg>',
+  history: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>',
 };
 
 function viewHeader() {
@@ -907,7 +967,7 @@ function viewSaveErrorBanner() {
 }
 
 function viewTabbar() {
-  const tabs = [['pick', 'Choose meals'], ['week', 'Menu'], ['budget', 'Budget'], ['summary', 'Summary']];
+  const tabs = [['pick', 'Choose meals'], ['week', 'Menu'], ['budget', 'Budget'], ['summary', 'Summary'], ['history', 'History']];
   return `
     <nav class="tabbar">
       ${tabs.map(([key, label]) => `
@@ -1125,8 +1185,8 @@ function viewBudget() {
     </div>`;
 }
 
-function viewTotals() {
-  const t = computeTotals(state.week);
+function viewTotals(w = state.week) {
+  const t = computeTotals(w);
   return `
     <div class="totals" id="totals" data-tone="${budgetTone(t)}">
       <div class="totals-inner">
@@ -1144,6 +1204,26 @@ function viewTotals() {
 
 /* ---------- Summary ---------- */
 
+// The painted week table, shared by Summary and the read-only History view.
+function viewSumBoard(w) {
+  return `
+    <div class="board sum-board">
+      <div class="board-head">Week of ${esc(w.week_start)}</div>
+      ${DAY_KEYS.map((day) => {
+        const lunch = lunchFor(w.days, day);
+        return `
+          <div class="sum-day">
+            <span class="d">${day.toUpperCase()}</span>
+            <span class="meals-col">
+              <span class="m-line"><span class="k">B</span>${esc(mealName(w.days[day]?.breakfast))}</span>
+              <span class="m-line"><span class="k">D</span>${esc(mealName(w.days[day]?.dinner))}</span>
+              ${lunch ? `<span class="m-line lunch"><span class="k">L</span>${esc(lunch.custom ?? mealName(lunch.mealId))}</span>` : ''}
+            </span>
+          </div>`;
+      }).join('')}
+    </div>`;
+}
+
 function viewSummary() {
   const w = state.week;
   const hasWeek = picksComplete(w);
@@ -1151,22 +1231,7 @@ function viewSummary() {
     <div class="screen">
       <h2 class="screen-title">Summary</h2>
 
-      ${hasWeek ? `
-        <div class="board sum-board">
-          <div class="board-head">Week of ${esc(w.week_start)}</div>
-          ${DAY_KEYS.map((day) => {
-            const lunch = lunchFor(w.days, day);
-            return `
-              <div class="sum-day">
-                <span class="d">${day.toUpperCase()}</span>
-                <span class="meals-col">
-                  <span class="m-line"><span class="k">B</span>${esc(mealName(w.days[day]?.breakfast))}</span>
-                  <span class="m-line"><span class="k">D</span>${esc(mealName(w.days[day]?.dinner))}</span>
-                  ${lunch ? `<span class="m-line lunch"><span class="k">L</span>${esc(lunch.custom ?? mealName(lunch.mealId))}</span>` : ''}
-                </span>
-              </div>`;
-          }).join('')}
-        </div>` : `
+      ${hasWeek ? viewSumBoard(w) : `
         <p class="empty-note">No menu yet — choose 7 mains and 7 breakfasts on the Choose meals tab.</p>`}
 
       <p class="list-title">Grocery list</p>
@@ -1182,7 +1247,71 @@ function viewSummary() {
             <span class="money">${fmtNum(g.price)}</span>
           </div>`).join('')}
 
+      ${hasWeek ? `
+        <button type="button" class="btn-primary save-week-btn" data-action="save-week">
+          Save this week &amp; start the next
+        </button>` : ''}
+
       ${viewTotals()}
+    </div>`;
+}
+
+/* ---------- History ---------- */
+
+function viewHistory() {
+  if (state.historyDetail) return viewHistoryDetail();
+  let body;
+  if (state.historyError) {
+    body = `
+      <p class="empty-note">${esc(state.historyError)}</p>
+      <button type="button" class="btn-primary" data-action="retry-history">Try again</button>`;
+  } else if (!state.history) {
+    body = '<p class="empty-note">Loading…</p>';
+  } else if (state.history.length === 0) {
+    body = '<p class="empty-note">No saved weeks yet — when a week is done, save it from the Summary tab.</p>';
+  } else {
+    body = state.history.map((w) => {
+      const t = computeTotals(w);
+      return `
+        <a class="hist-row" href="#/history/${esc(w.week_start)}">
+          <span class="hist-date">Week of ${fmtDate(w.week_start)}</span>
+          <span class="money">${fmtNum(t.total)}${w.budget != null ? ` / ${fmtNum(w.budget)}` : ''}</span>
+        </a>`;
+    }).join('');
+  }
+  return `
+    <div class="screen">
+      <h2 class="screen-title">History</h2>
+      ${body}
+    </div>`;
+}
+
+// Read-only: no ticks, no inputs — the week is a record, not a worksheet.
+function viewHistoryDetail() {
+  const w = state.history?.find((x) => x.week_start === state.historyDetail);
+  if (!w) {
+    return `
+      <div class="screen">
+        <h2 class="screen-title">History</h2>
+        <p class="empty-note">${state.history ? 'No saved week for that date.' : 'Loading…'}</p>
+        <p><a class="hist-back" href="#/history">← All weeks</a></p>
+      </div>`;
+  }
+  return `
+    <div class="screen">
+      <h2 class="screen-title">History</h2>
+      <p><a class="hist-back" href="#/history">← All weeks</a></p>
+      ${viewSumBoard(w)}
+      <p class="list-title">Grocery list</p>
+      ${w.groceries.length === 0
+        ? '<p class="empty-note">No groceries were listed.</p>'
+        : w.groceries.map((g) => `
+          <div class="g-row shop-row ${g.checked ? 'is-checked' : ''}">
+            <span class="tick-static">${g.checked ? '✓' : ''}</span>
+            <span class="g-name">${esc(g.name)}</span>
+            <span class="money">${fmtNum(g.price)}</span>
+          </div>`).join('')}
+      ${viewTotals(w)}
     </div>`;
 }
 
@@ -1196,7 +1325,7 @@ function render() {
     case 'signin':      app.innerHTML = viewSignin(); return;
     case 'error':       app.innerHTML = viewError(); return;
   }
-  const screens = { pick: viewPick, week: viewWeek, budget: viewBudget, summary: viewSummary };
+  const screens = { pick: viewPick, week: viewWeek, budget: viewBudget, summary: viewSummary, history: viewHistory };
   app.innerHTML = viewHeader() + viewSaveErrorBanner() + screens[state.route]() + viewTabbar();
 }
 
@@ -1288,6 +1417,40 @@ const actions = {
   'retry-sync': () => { resync(); },
   'retry-save': () => { flushSave(); },
   'reload': () => { location.reload(); },
+
+  // Flush first so the row being frozen is the row on screen; only a clean
+  // 'saved' status may proceed — saving over a failed sync would freeze
+  // stale data as the permanent record.
+  'save-week': async () => {
+    if (!confirm('Save this week and start the next?')) return;
+    await flushSave();
+    if (state.saveStatus !== 'saved') {
+      alert("Your latest changes haven't reached Supabase — retry the save first, then save the week.");
+      return;
+    }
+    try {
+      await db.markWeekSaved(state.week.id);
+    } catch (err) {
+      alert(`Couldn't save the week: ${err?.message ?? 'no connection'}. Nothing was lost — try again.`);
+      return;
+    }
+    state.history = null; // the cached list no longer has the newest week
+    try {
+      state.week = await db.loadActiveWeek(state.session.user.id, currentMonday());
+    } catch {
+      alert('The week is saved, but starting the next one failed — reload to continue.');
+      return;
+    }
+    state.lifted = null;
+    location.hash = '#/pick'; // a fresh week starts at choosing meals
+    render();
+  },
+
+  'retry-history': () => {
+    state.historyError = '';
+    render();
+    loadHistory();
+  },
 };
 
 document.addEventListener('click', (e) => {
@@ -1421,18 +1584,14 @@ document.addEventListener('submit', async (e) => {
   }
 });
 
-/* ---------- routing — hash-based so the phone's back button behaves ---------- */
-const ROUTES = ['pick', 'week', 'budget', 'summary'];
-
-function currentRoute() {
-  const m = location.hash.match(/^#\/(\w+)/);
-  return ROUTES.includes(m?.[1]) ? m[1] : 'pick';
-}
-
+/* ---------- routing lives in 3. UTILITIES; this is only the wiring ---------- */
 window.addEventListener('hashchange', () => {
-  state.route = currentRoute();
+  const { route, detail } = currentRoute();
+  state.route = route;
+  state.historyDetail = detail;
   state.lifted = null;
   state.addOpen = false;
+  if (route === 'history') loadHistory();
   if (state.phase === 'ready') render();
 });
 
@@ -1464,14 +1623,17 @@ async function initData() {
     let { meals, staples } = await db.loadLibrary();
     if (meals.length === 0) meals = await db.seedMeals(state.session.user.id);
     if (staples.length === 0) staples = await db.seedStaples(state.session.user.id);
-    const week = await db.ensureWeek(state.session.user.id, currentMonday());
+    const week = await db.loadActiveWeek(state.session.user.id, currentMonday());
 
     state.meals = meals;
     state.staples = staples;
     state.week = week;
     state.saveStatus = 'saved';
     state.phase = 'ready';
-    state.route = currentRoute();
+    const { route, detail } = currentRoute();
+    state.route = route;
+    state.historyDetail = detail;
+    if (route === 'history') loadHistory();
   } catch (err) {
     state.phase = 'error';
     state.errorMsg = err?.message
@@ -1488,6 +1650,25 @@ async function resync() {
   // layer can never succeed then; re-run the boot path instead
   if (!db.client) return main();
   await initData();
+}
+
+// Saved weeks load lazily on the first History visit and stay cached until
+// a save-week invalidates them (state.history = null).
+let historyInFlight = false;
+async function loadHistory() {
+  if (historyInFlight || state.history) return;
+  historyInFlight = true;
+  try {
+    state.history = await db.listSavedWeeks();
+    state.historyError = '';
+  } catch (err) {
+    state.historyError = err?.message
+      ? `Couldn't load past weeks: ${err.message}`
+      : "Couldn't load past weeks — check your connection.";
+  } finally {
+    historyInFlight = false;
+  }
+  if (state.phase === 'ready') render();
 }
 
 async function boot(client) {
