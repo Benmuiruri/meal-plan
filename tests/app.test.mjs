@@ -950,6 +950,8 @@ test('the save-week action gates the UI for the duration and maps every outcome'
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/\/\/[^\n]*/g, '');
   assert.match(live, /if \(saveWeekBusy\(\)\) return/);
+  assert.match(live, /outcome === 'busy'\) return/,
+    'a busy outcome must not tear down the running flow’s gate');
   // the lock: nothing is editable while the flow runs, so no debounced save
   // can fire into the frozen record...
   assert.match(live, /state\.phase = 'loading';\s*state\.loadingMsg = 'Saving the week…';\s*render\(\);\s*const \{ outcome, error \} = await performSaveWeek\(currentMonday\(\)\)/);

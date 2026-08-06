@@ -537,7 +537,9 @@ async function resizeImage(file) {
   const bmp = await createImageBitmap(file).catch(() => {
     throw new Error("couldn't read that image — try a JPEG or PNG");
   });
-  // dimensions are unknowable before the decode — this guard cannot be hoisted
+  // dimensions are unknowable before the decode, which has already allocated
+  // the bitmap — this bounds only the canvas below; the 20MB file check above
+  // is the sole pre-decode bound
   if (bmp.width * bmp.height > 50e6) {
     bmp.close();
     throw new Error('that image has too many pixels — 50 megapixels max');
@@ -1444,7 +1446,7 @@ const actions = {
   'reload': () => { location.reload(); },
 
   'save-week': async () => {
-    if (saveWeekBusy()) return; // belt; performSaveWeek's own guard is braces
+    if (saveWeekBusy()) return; // no confirm dialog over a running flow
     if (!confirm('Save this week and start the next?')) return;
     // gate the UI: an edit typed mid-flow would arm a debounced save that
     // fires into the just-frozen record
@@ -1453,6 +1455,9 @@ const actions = {
     render();
     const { outcome, error } = await performSaveWeek(currentMonday());
     state.loadingMsg = '';
+    // busy belongs to the OTHER invocation — touching phase here would tear
+    // down the loading gate of the flow still in flight
+    if (outcome === 'busy') return;
     if (outcome === 'save-unknown' || outcome === 'load-failed') {
       // editing must stop — Try again resyncs onto the truth either way
       state.phase = 'error';
