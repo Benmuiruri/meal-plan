@@ -1454,10 +1454,11 @@ const actions = {
     state.loadingMsg = 'Saving the week…';
     render();
     const { outcome, error } = await performSaveWeek(currentMonday());
-    state.loadingMsg = '';
-    // busy belongs to the OTHER invocation — touching phase here would tear
-    // down the loading gate of the flow still in flight
+    // unreachable via this sole caller (the guard above runs with no await
+    // before the call) — kept first so no future second caller can clobber
+    // the running flow's gate or its caption
     if (outcome === 'busy') return;
+    state.loadingMsg = '';
     if (outcome === 'save-unknown' || outcome === 'load-failed') {
       // editing must stop — Try again resyncs onto the truth either way
       state.phase = 'error';
