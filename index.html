@@ -774,9 +774,13 @@ const state = {
 };
 
 // A card photo that fails to load gets a volatile imageDead flag: re-renders
-// show the tinted tile instead of refiring the request. The flag is a claim
-// about the network as much as the URL, so connectivity returning clears it
-// and lets every degraded card try its photo again.
+// show the tinted tile instead of refiring the request. The flag's whole
+// lifetime is documented here and nowhere else. Recovery is deliberately
+// narrow: only an online transition (navigator.onLine false→true) clears
+// the flags, via reviveDeadImages in the online listener. A failure while
+// the browser stayed "online" — timeout, gateway error — keeps the tile
+// until the next session loads meals fresh. Accepted trade-off: broader
+// revival would re-fetch permanently dead URLs on every trigger.
 function markDeadImage(imgEl) {
   if (imgEl?.tagName !== 'IMG') return false;
   const card = imgEl.closest('.meal-card[data-id]');
@@ -972,10 +976,8 @@ function viewPick() {
       <div class="pick-grid">
         ${cards.map((m) => {
           const isPicked = picked.includes(m.id);
-          // imageDead is a volatile per-session flag set by the capture-phase
-          // error listener: a dead URL degrades to the tinted name tile, and
-          // re-renders don't refire the failed request. Coming back online
-          // clears the flags (reviveDeadImages) and the photos try again.
+          // imageDead → tinted name tile; the flag's lifetime is documented
+          // on markDeadImage
           const face = m.image_url && !m.imageDead
             ? `<img src="${esc(m.image_url)}" alt="" loading="lazy"><span class="shade"></span>`
             : '';
