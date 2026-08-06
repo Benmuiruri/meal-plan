@@ -843,17 +843,64 @@ test('a pipeline that ends in error while save-week waits still reports dirty', 
   await sleep(250); // let the deferred re-queue fire and fail against our own fake
 });
 
-test('the quiescence wait has a ceiling — a hung pipeline exits dirty, not a dead button', async () => {
+test('the quiescence wait has a ceiling — a hung pipeline exits dirty with an honest status', async () => {
   state.session = { user: { id: 'u1' } };
   db.client = fakeWeeksReader({ latest: { id: 'w1', status: 'saved', week_start: '2026-08-03' }, hang: 1 });
   scheduleSave();                          // status → 'saving'
   const inflight = flushSave();            // hangs until release()
   const result = await performSaveWeek('2026-08-03', 120);
   assert.equal(result.outcome, 'dirty');
+  assert.equal(state.saveStatus, 'error', 'the chip must not read "Saving" forever — and the Retry banner needs error');
   assert.ok(!db.client.log.includes('flip-status'));
+  // a re-entry while the request is still hung must exit at once, not
+  // freeze the screen for another full ceiling
+  const t0 = Date.now();
+  assert.equal((await performSaveWeek('2026-08-03', 5000)).outcome, 'dirty');
+  assert.ok(Date.now() - t0 < 1000, 'no second full-ceiling wait');
   db.client.release();                     // un-hang, then drain our own timers
   await inflight;
   await sleep(300);
+});
+
+test('after a vanished row, a retry restores it via the flush self-heal and then freezes it', async () => {
+  state.session = { user: { id: 'u1' } };
+  // the row disappears between the first flush and the first flip; the
+  // second attempt's flush hits zero rows, self-heals by upsert, and the
+  // flip lands on the restored row
+  let exists = true;
+  let flips = 0;
+  const log = [];
+  db.client = { from() {
+    const q = { op: 'select', payload: null, opts: null };
+    const b = {
+      select: () => b, maybeSingle: () => b, single: () => b, limit: () => b,
+      order: () => b, eq: () => b,
+      insert: (p) => { q.op = 'insert'; q.payload = p; return b; },
+      update: (p) => { q.op = 'update'; q.payload = p; return b; },
+      upsert: (p, o) => { q.op = 'upsert'; q.payload = p; q.opts = o; return b; },
+      then(resolve) {
+        const isFlip = q.op === 'update' && q.payload?.status === 'saved';
+        log.push(isFlip ? 'flip' : q.op);
+        if (isFlip) {
+          flips++;
+          if (flips === 1) { exists = false; return void resolve({ data: [], error: null }); }
+          return void resolve({ data: exists ? [{ id: state.week.id }] : [], error: null });
+        }
+        if (q.op === 'update') return void resolve({ data: exists ? [{ id: state.week.id }] : [], error: null });
+        if (q.op === 'upsert') { exists = true; return void resolve({ data: { id: 'w-restored' }, error: null }); }
+        if (q.op === 'insert') return void resolve({ data: { id: 'w-next', status: 'draft', ...q.payload }, error: null });
+        return void resolve({ data: { id: 'w-restored', status: 'saved', week_start: state.week.week_start }, error: null });
+      },
+    };
+    return b;
+  } };
+  const first = await performSaveWeek('2026-08-03');
+  assert.equal(first.outcome, 'save-failed');
+  assert.equal(first.error.weekRowGone, true);
+  const second = await performSaveWeek('2026-08-03');
+  assert.equal(second.outcome, 'done', 'the advice "retrying restores it" is true end to end');
+  assert.ok(log.includes('upsert'), 'the self-heal actually ran');
+  assert.equal(state.week.id, 'w-next', 'and the flow finished on a fresh draft');
 });
 
 test('a REJECTED status flip (coded) changes nothing and reports save-failed with the reason', async () => {
@@ -912,13 +959,19 @@ test('the save-week action gates the UI for the duration and maps every outcome'
     .replace(/\/\/[^\n]*/g, '');
   assert.match(live, /if \(saveWeekBusy\(\)\) return/);
   // the lock: nothing is editable while the flow runs, so no debounced save
-  // can fire into the frozen record
-  assert.match(live, /state\.phase = 'loading';\s*render\(\);\s*const \{ outcome, error \} = await performSaveWeek\(currentMonday\(\)\)/);
+  // can fire into the frozen record...
+  assert.match(live, /state\.phase = 'loading';\s*state\.loadingMsg = 'Saving the week…';\s*render\(\);\s*const \{ outcome, error \} = await performSaveWeek\(currentMonday\(\)\)/);
+  // ...and every branch releases it: unknowable outcomes into the error
+  // lock, everything else back to ready
+  assert.match(live, /outcome === 'save-unknown' \|\| outcome === 'load-failed'\)[\s\S]{0,150}?state\.phase = 'error'/);
+  assert.match(live, /state\.phase = 'ready'/, 'the gate must be released on the retryable outcomes');
   // messages are pinned INSIDE their branches — swapping them fails
   assert.match(live, /outcome === 'save-unknown'\s*\? "Couldn't confirm whether the week was saved/);
   assert.match(live, /: 'The week was saved, but starting the next one failed/);
+  assert.match(live, /outcome === 'dirty'\)[\s\S]{0,120}?alert\(/, 'a dirty week is told, not shrugged at');
   assert.match(live, /outcome === 'save-failed'\)[\s\S]{0,80}?error\?\.message/, 'the rejection reason reaches the user');
-  assert.match(live, /outcome === 'done'\)[\s\S]{0,60}?location\.hash = '#\/pick'/);
+  // done must not rely on a hashchange event that an equal hash never fires
+  assert.match(live, /outcome === 'done'\)[\s\S]{0,250}?history\.replaceState\(null, '', '#\/pick'\);\s*render\(\)/);
 });
 
 // ── history templates, executed with the real domain slice ────────────

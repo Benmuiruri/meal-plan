@@ -821,6 +821,7 @@ async function signIn(email, password) {
    ================================================================ */
 const state = {
   phase: 'loading',   // loading | config | signin | ready | error
+  loadingMsg: '',     // the loading gate's words when it isn't a cold boot
   errorMsg: '',
   signinEmail: '',    // survives a failed attempt so only the password is retyped
   session: null,
@@ -941,13 +942,14 @@ function setSaveStatus(status) {
 //   busy         — a save-week is already running (double-tap)
 //   dirty        — pending edits could not reach Supabase; freezing now
 //                  would make stale data the permanent record
-//   save-failed  — the server REJECTED the flip (coded error): provably
-//                  nothing changed, retrying is honest advice
-//   save-unknown — the flip's outcome is unknowable (transport failure, or
-//                  the row vanished): the row may be frozen while memory
-//                  says draft. Only a resync can tell — the caller must
-//                  lock the UI into it, and loadActiveWeek then lands on
-//                  the truth whichever way the flip went.
+//   save-failed  — the flip provably did not land: a coded server
+//                  rejection, or the row vanished (weekRowGone). Retrying
+//                  is honest advice — a retry's flush self-heals a
+//                  vanished row, then the flip lands.
+//   save-unknown — transport failure only: the row may be frozen while
+//                  memory says draft. Only a resync can tell — the caller
+//                  must lock the UI into it, and loadActiveWeek then lands
+//                  on the truth whichever way the flip went.
 //   load-failed  — the week IS saved (state.week.status flips in memory at
 //                  once, so the self-heal upsert can never resurrect it as
 //                  a draft) but the next draft could not start — lock, not
@@ -966,6 +968,14 @@ async function performSaveWeek(todayMonday, waitCeilingMs = 15000) {
     const deadline = Date.now() + waitCeilingMs;
     while (state.saveStatus === 'saving' && Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 50));
+    }
+    if (state.saveStatus === 'saving') {
+      // ceiling elapsed with the request still in flight — the chip must
+      // not read "Saving" forever. Declare the sync failed (the Retry
+      // banner appears); a straggler that eventually lands flips it back
+      // to saved, and a save-week re-entry exits here at once instead of
+      // freezing the screen for another full ceiling.
+      setSaveStatus('error');
     }
     if (state.saveStatus !== 'saved') return { outcome: 'dirty' };
     try {
@@ -1383,7 +1393,7 @@ function viewHistoryDetail() {
 function render() {
   const app = $('#app');
   switch (state.phase) {
-    case 'loading':     app.innerHTML = viewGate('<p>Loading…</p>'); return;
+    case 'loading':     app.innerHTML = viewGate(`<p>${esc(state.loadingMsg || 'Loading…')}</p>`); return;
     case 'config':      app.innerHTML = viewConfig(); return;
     case 'signin':      app.innerHTML = viewSignin(); return;
     case 'error':       app.innerHTML = viewError(); return;
@@ -1489,8 +1499,10 @@ const actions = {
     // gate the whole UI for the duration: an edit typed mid-flow would arm
     // a debounced save that fires into the just-frozen record
     state.phase = 'loading';
+    state.loadingMsg = 'Saving the week…';
     render();
     const { outcome, error } = await performSaveWeek(currentMonday());
+    state.loadingMsg = '';
     if (outcome === 'save-unknown' || outcome === 'load-failed') {
       // editing must stop — the error screen's Try again resyncs onto the
       // truth: the fresh draft, or this week still a draft
@@ -1503,12 +1515,17 @@ const actions = {
     }
     state.phase = 'ready';
     if (outcome === 'done') {
-      location.hash = '#/pick'; // hashchange paints the fresh week once
+      // no reliance on hashchange: Back during the gate can leave the hash
+      // at #/pick already, and an equal assignment fires no event at all
+      state.route = 'pick';
+      state.historyDetail = null;
+      history.replaceState(null, '', '#/pick');
+      render();
       return;
     }
     render();
     if (outcome === 'dirty') {
-      alert("Your latest changes haven't reached Supabase yet — wait a moment or retry the save, then save the week.");
+      alert("Your latest changes haven't reached Supabase — the Retry banner sends them again; then save the week.");
     } else if (outcome === 'save-failed') {
       alert(`Couldn't save the week: ${error?.message ?? 'refused'}. Nothing was changed — try again.`);
     }
