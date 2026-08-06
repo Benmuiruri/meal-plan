@@ -973,8 +973,9 @@ function viewPick() {
         ${cards.map((m) => {
           const isPicked = picked.includes(m.id);
           // imageDead is a volatile per-session flag set by the capture-phase
-          // error listener: a dead URL degrades to the tinted name tile and
-          // stays degraded — re-renders must not refire the failed request
+          // error listener: a dead URL degrades to the tinted name tile, and
+          // re-renders don't refire the failed request. Coming back online
+          // clears the flags (reviveDeadImages) and the photos try again.
           const face = m.image_url && !m.imageDead
             ? `<img src="${esc(m.image_url)}" alt="" loading="lazy"><span class="shade"></span>`
             : '';
