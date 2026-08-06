@@ -971,10 +971,12 @@ async function performSaveWeek(todayMonday, waitCeilingMs = 15000) {
     }
     if (state.saveStatus === 'saving') {
       // ceiling elapsed with the request still in flight — the chip must
-      // not read "Saving" forever. Declare the sync failed (the Retry
-      // banner appears); a straggler that eventually lands flips it back
-      // to saved, and a save-week re-entry exits here at once instead of
-      // freezing the screen for another full ceiling.
+      // not read "Saving" forever. Declare the sync failed as a TRANSIENT
+      // failure (a stale permanent flag would paint the data-loss Reload
+      // banner over a merely slow request); a straggler that eventually
+      // lands flips it back to saved, and a save-week re-entry exits here
+      // at once instead of freezing the screen for another full ceiling.
+      state.saveErrorPermanent = false;
       setSaveStatus('error');
     }
     if (state.saveStatus !== 'saved') return { outcome: 'dirty' };
@@ -1516,7 +1518,10 @@ const actions = {
     state.phase = 'ready';
     if (outcome === 'done') {
       // no reliance on hashchange: Back during the gate can leave the hash
-      // at #/pick already, and an equal assignment fires no event at all
+      // at #/pick already, and an equal assignment fires no event at all.
+      // replaceState, not pushState: the Summary entry belonged to the week
+      // that just finished — Back into the fresh draft's empty Summary
+      // would be a confusing non-place.
       state.route = 'pick';
       state.historyDetail = null;
       history.replaceState(null, '', '#/pick');
@@ -1525,7 +1530,9 @@ const actions = {
     }
     render();
     if (outcome === 'dirty') {
-      alert("Your latest changes haven't reached Supabase — the Retry banner sends them again; then save the week.");
+      // deliberately general: when the pipeline is merely slow the Retry
+      // banner is inert, so the chip is the one truthful reference
+      alert("Your latest changes haven't reached Supabase — once the header reads Saved, save the week again.");
     } else if (outcome === 'save-failed') {
       alert(`Couldn't save the week: ${error?.message ?? 'refused'}. Nothing was changed — try again.`);
     }

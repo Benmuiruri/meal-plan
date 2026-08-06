@@ -848,9 +848,11 @@ test('the quiescence wait has a ceiling — a hung pipeline exits dirty with an 
   db.client = fakeWeeksReader({ latest: { id: 'w1', status: 'saved', week_start: '2026-08-03' }, hang: 1 });
   scheduleSave();                          // status → 'saving'
   const inflight = flushSave();            // hangs until release()
+  state.saveErrorPermanent = true;         // stale flag from an older failure
   const result = await performSaveWeek('2026-08-03', 120);
   assert.equal(result.outcome, 'dirty');
   assert.equal(state.saveStatus, 'error', 'the chip must not read "Saving" forever — and the Retry banner needs error');
+  assert.equal(state.saveErrorPermanent, false, 'a slow request is transient — never the data-loss Reload banner');
   assert.ok(!db.client.log.includes('flip-status'));
   // a re-entry while the request is still hung must exit at once, not
   // freeze the screen for another full ceiling
@@ -964,14 +966,18 @@ test('the save-week action gates the UI for the duration and maps every outcome'
   // ...and every branch releases it: unknowable outcomes into the error
   // lock, everything else back to ready
   assert.match(live, /outcome === 'save-unknown' \|\| outcome === 'load-failed'\)[\s\S]{0,150}?state\.phase = 'error'/);
-  assert.match(live, /state\.phase = 'ready'/, 'the gate must be released on the retryable outcomes');
+  // release is anchored ABOVE the done branch, so dirty and save-failed
+  // inherit it — inside the done block it would leave the gate painted
+  assert.match(live, /state\.phase = 'ready';\s*if \(outcome === 'done'\)/,
+    'the gate must be released before the outcome fan-out');
   // messages are pinned INSIDE their branches — swapping them fails
   assert.match(live, /outcome === 'save-unknown'\s*\? "Couldn't confirm whether the week was saved/);
   assert.match(live, /: 'The week was saved, but starting the next one failed/);
   assert.match(live, /outcome === 'dirty'\)[\s\S]{0,120}?alert\(/, 'a dirty week is told, not shrugged at');
   assert.match(live, /outcome === 'save-failed'\)[\s\S]{0,80}?error\?\.message/, 'the rejection reason reaches the user');
   // done must not rely on a hashchange event that an equal hash never fires
-  assert.match(live, /outcome === 'done'\)[\s\S]{0,250}?history\.replaceState\(null, '', '#\/pick'\);\s*render\(\)/);
+  // — all four statements, in order: route, detail, hash sync, paint
+  assert.match(live, /state\.route = 'pick';\s*state\.historyDetail = null;\s*history\.replaceState\(null, '', '#\/pick'\);\s*render\(\)/);
 });
 
 // ── history templates, executed with the real domain slice ────────────
