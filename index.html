@@ -697,7 +697,14 @@ const db = {
     const { data, error } = await this.client.from('weeks')
       .update({ status: 'saved' }).eq('id', weekId).select('id');
     if (error) throw error;
-    if (!data || data.length === 0) throw new Error('week row missing — reload and try again');
+    if (!data || data.length === 0) {
+      // a KNOWN outcome — PostgREST answered, zero rows matched, nothing
+      // flipped. Flagged so the caller treats it as retryable: the flush's
+      // self-heal upsert restores a vanished row, then the flip lands.
+      const gone = new Error("this week's record vanished — retrying restores it");
+      gone.weekRowGone = true;
+      throw gone;
+    }
   },
 
   async listSavedWeeks() {
@@ -948,19 +955,28 @@ function setSaveStatus(status) {
 //   done         — state.week is the fresh draft
 let saveWeekInFlight = false;
 const saveWeekBusy = () => saveWeekInFlight;
-async function performSaveWeek(todayMonday) {
+async function performSaveWeek(todayMonday, waitCeilingMs = 15000) {
   if (saveWeekInFlight) return { outcome: 'busy' };
   saveWeekInFlight = true;
   try {
     await flushSave();
     // a flush requested while another was in flight re-queues on a timer —
-    // wait the pipeline out rather than misreading 'saving' as failure
-    while (state.saveStatus === 'saving') await new Promise((r) => setTimeout(r, 50));
+    // wait the pipeline out rather than misreading 'saving' as failure, but
+    // bounded: a hung request must exit as dirty, not latch the flow forever
+    const deadline = Date.now() + waitCeilingMs;
+    while (state.saveStatus === 'saving' && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
     if (state.saveStatus !== 'saved') return { outcome: 'dirty' };
     try {
       await db.markWeekSaved(state.week.id);
     } catch (err) {
-      return { outcome: isServerRejection(err) ? 'save-failed' : 'save-unknown', error: err };
+      // a coded rejection or a provably-vanished row means nothing flipped —
+      // retrying is honest advice. Anything else is unknowable.
+      return {
+        outcome: (err?.weekRowGone || isServerRejection(err)) ? 'save-failed' : 'save-unknown',
+        error: err,
+      };
     }
     state.week.status = 'saved';
     state.history = null; // the cached list no longer has the newest week
@@ -1468,23 +1484,33 @@ const actions = {
   // performSaveWeek owns ordering and failure outcomes; this owns the
   // dialogs and where each outcome lands.
   'save-week': async () => {
-    if (saveWeekBusy()) return; // no second confirm for an impatient tap
+    if (saveWeekBusy()) return; // belt — the loading gate below is braces
     if (!confirm('Save this week and start the next?')) return;
+    // gate the whole UI for the duration: an edit typed mid-flow would arm
+    // a debounced save that fires into the just-frozen record
+    state.phase = 'loading';
+    render();
     const { outcome, error } = await performSaveWeek(currentMonday());
-    if (outcome === 'dirty') {
-      alert("Your latest changes haven't reached Supabase — retry the save first, then save the week.");
-    } else if (outcome === 'save-failed') {
-      alert(`Couldn't save the week: ${error?.message ?? 'refused'}. Nothing was changed — try again.`);
-    } else if (outcome === 'save-unknown' || outcome === 'load-failed') {
-      // in both, editing must stop — the error screen's Try again resyncs
-      // onto the truth: the fresh draft, or this week still a draft
+    if (outcome === 'save-unknown' || outcome === 'load-failed') {
+      // editing must stop — the error screen's Try again resyncs onto the
+      // truth: the fresh draft, or this week still a draft
       state.phase = 'error';
       state.errorMsg = outcome === 'save-unknown'
         ? "Couldn't confirm whether the week was saved. Tap Try again — the resync sorts it out either way."
         : 'The week was saved, but starting the next one failed. Tap Try again.';
       render();
-    } else if (outcome === 'done') {
+      return;
+    }
+    state.phase = 'ready';
+    if (outcome === 'done') {
       location.hash = '#/pick'; // hashchange paints the fresh week once
+      return;
+    }
+    render();
+    if (outcome === 'dirty') {
+      alert("Your latest changes haven't reached Supabase yet — wait a moment or retry the save, then save the week.");
+    } else if (outcome === 'save-failed') {
+      alert(`Couldn't save the week: ${error?.message ?? 'refused'}. Nothing was changed — try again.`);
     }
   },
 

@@ -705,15 +705,19 @@ test('the image-error and online wiring: capture phase, and recovery on connecti
 // fake for the weeks-table paths performSaveWeek exercises end to end:
 // flushSave's update, markWeekSaved's status flip, loadActiveWeek's
 // select/insert. `log` records the operation order.
-function fakeWeeksReader({ latest = null, saved = [], failWith = null,
-                           failSelect = false, failStatusUpdate = false, delayMs = 0 } = {}) {
+function fakeWeeksReader({ latest = null, saved = [], failWith = null, failSelect = false,
+                           failStatusUpdate = false, flipZeroRows = false, delayMs = 0, hang = 0 } = {}) {
   const inserts = [];
   const filters = [];
   const log = [];
+  const hung = [];
+  let hangsLeft = hang;
   return {
     inserts,
     filters,
     log,
+    // completes any requests parked by `hang`, so a test can drain its own timers
+    release: () => hung.splice(0).forEach((f) => f()),
     from() {
       const q = { op: 'select', payload: null, statusEq: false };
       const b = {
@@ -726,11 +730,16 @@ function fakeWeeksReader({ latest = null, saved = [], failWith = null,
         async then(resolve) {
           if (delayMs) await sleep(delayMs);
           log.push(q.op === 'update' ? (q.payload?.status ? 'flip-status' : 'flush-week') : q.op);
+          if (hangsLeft > 0) {
+            hangsLeft--;
+            hung.push(() => resolve({ data: [{ id: 'w1' }], error: null }));
+            return;
+          }
           if (failWith) return resolve({ data: null, error: failWith });
           if (q.op === 'update') {
-            return resolve(q.payload?.status && failStatusUpdate
-              ? { data: null, error: failStatusUpdate }
-              : { data: [{ id: 'w1' }], error: null });
+            if (q.payload?.status && failStatusUpdate) return resolve({ data: null, error: failStatusUpdate });
+            if (q.payload?.status && flipZeroRows) return resolve({ data: [], error: null });
+            return resolve({ data: [{ id: 'w1' }], error: null });
           }
           if (q.op === 'insert') {
             return resolve({ data: { id: 'new-week', status: 'draft', ...inserts[inserts.length - 1] }, error: null });
@@ -772,13 +781,13 @@ test('loadActiveWeek with no weeks at all starts the current Monday', async () =
   assert.deepEqual(db.client.inserts, [{ user_id: 'u1', week_start: '2026-08-03' }]);
 });
 
-test('markWeekSaved flips exactly the status, and fails loudly on a vanished row', async () => {
+test('markWeekSaved flips exactly the status, and flags a vanished row as a known condition', async () => {
   db.client = fakeWeeksClient();
   await db.markWeekSaved('w1');
   assert.deepEqual(db.client.ops('update')[0].payload, { status: 'saved' });
 
   db.client = fakeWeeksClient({ matchedRows: [] });
-  await assert.rejects(db.markWeekSaved('w1'), /missing/);
+  await assert.rejects(db.markWeekSaved('w1'), (err) => err.weekRowGone === true);
 });
 
 test('listSavedWeeks asks for saved rows newest first', async () => {
@@ -808,13 +817,43 @@ test('performSaveWeek refuses to freeze a week whose sync failed', async () => {
   assert.equal(state.saveStatus, 'error');
 });
 
-test('performSaveWeek waits out an in-flight flush instead of misreading saving as dirty', async () => {
+test('performSaveWeek waits out an in-flight flush AND its deferred re-queue before flipping', async () => {
   state.session = { user: { id: 'u1' } };
   db.client = fakeWeeksReader({ latest: { id: 'w1', status: 'saved', week_start: '2026-08-03' }, delayMs: 40 });
-  const inflight = flushSave();            // the pipeline is mid-flush when save-week arrives
+  scheduleSave();                          // status → 'saving', debounce armed
+  const inflight = flushSave();            // consumes the debounce; pipeline mid-flight
   const result = await performSaveWeek('2026-08-03');
   await inflight;
   assert.equal(result.outcome, 'done', 'a healthy pipeline mid-flush is not a dirty week');
+  const lastFlush = db.client.log.lastIndexOf('flush-week');
+  assert.ok(db.client.log.filter((op) => op === 'flush-week').length >= 2,
+    'the deferred re-queue ran — the wait loop was genuinely entered');
+  assert.ok(db.client.log.indexOf('flip-status') > lastFlush, 'the flip waits for full quiescence');
+});
+
+test('a pipeline that ends in error while save-week waits still reports dirty', async () => {
+  state.session = { user: { id: 'u1' } };
+  db.client = fakeWeeksReader({ failWith: { message: 'down' }, delayMs: 40 });
+  scheduleSave();
+  const inflight = flushSave();
+  const result = await performSaveWeek('2026-08-03');
+  await inflight;
+  assert.equal(result.outcome, 'dirty');
+  assert.ok(!db.client.log.includes('flip-status'));
+  await sleep(250); // let the deferred re-queue fire and fail against our own fake
+});
+
+test('the quiescence wait has a ceiling — a hung pipeline exits dirty, not a dead button', async () => {
+  state.session = { user: { id: 'u1' } };
+  db.client = fakeWeeksReader({ latest: { id: 'w1', status: 'saved', week_start: '2026-08-03' }, hang: 1 });
+  scheduleSave();                          // status → 'saving'
+  const inflight = flushSave();            // hangs until release()
+  const result = await performSaveWeek('2026-08-03', 120);
+  assert.equal(result.outcome, 'dirty');
+  assert.ok(!db.client.log.includes('flip-status'));
+  db.client.release();                     // un-hang, then drain our own timers
+  await inflight;
+  await sleep(300);
 });
 
 test('a REJECTED status flip (coded) changes nothing and reports save-failed with the reason', async () => {
@@ -832,6 +871,15 @@ test('an UNKNOWN flip outcome (no code) reports save-unknown — the row may be 
   db.client = fakeWeeksReader({ failStatusUpdate: { message: 'TypeError: Failed to fetch' } });
   assert.equal((await performSaveWeek('2026-08-03')).outcome, 'save-unknown');
   assert.equal(db.client.inserts.length, 0, 'no next draft on an unconfirmed save');
+});
+
+test('a vanished row is a KNOWN outcome: save-failed, flagged, and retryable', async () => {
+  state.session = { user: { id: 'u1' } };
+  db.client = fakeWeeksReader({ flipZeroRows: true });
+  const { outcome, error } = await performSaveWeek('2026-08-03');
+  assert.equal(outcome, 'save-failed', 'PostgREST answered — nothing about this is unknowable');
+  assert.equal(error.weekRowGone, true);
+  assert.match(error.message, /retrying restores it/, 'the advice is true: the flush self-heal recreates the row');
 });
 
 test('a failed next-draft load still flips memory to saved — the record cannot resurrect as a draft', async () => {
@@ -855,20 +903,22 @@ test('performSaveWeek is single-flight: the second tap of a double-tap is busy',
   assert.equal(db.client.inserts.length, 1, 'exactly one next draft, no unique-key collision');
 });
 
-test('the save-week action maps every outcome: alerts for retryable, error-lock for unknowable, pick for done', () => {
+test('the save-week action gates the UI for the duration and maps every outcome', () => {
   const hStart = html.indexOf("'save-week':");
   const hEnd = html.indexOf("'retry-history':");
   assert.ok(hStart > 0 && hEnd > hStart, 'save-week handler markers found in index.html');
   const live = html.slice(hStart, hEnd)
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/\/\/[^\n]*/g, '');
-  assert.match(live, /if \(saveWeekBusy\(\)\) return/, 'no second confirm during a running save');
-  assert.match(live, /await performSaveWeek\(currentMonday\(\)\)/);
-  assert.match(live, /outcome === 'dirty'/);
-  assert.match(live, /outcome === 'save-failed'[\s\S]{0,120}?error\?\.message/, 'the rejection reason reaches the user');
-  assert.match(live, /outcome === 'save-unknown' \|\| outcome === 'load-failed'[\s\S]{0,400}?state\.phase = 'error'/,
-    'both unknowable outcomes lock into the resync screen');
-  assert.match(live, /outcome === 'done'[\s\S]{0,80}?location\.hash = '#\/pick'/);
+  assert.match(live, /if \(saveWeekBusy\(\)\) return/);
+  // the lock: nothing is editable while the flow runs, so no debounced save
+  // can fire into the frozen record
+  assert.match(live, /state\.phase = 'loading';\s*render\(\);\s*const \{ outcome, error \} = await performSaveWeek\(currentMonday\(\)\)/);
+  // messages are pinned INSIDE their branches — swapping them fails
+  assert.match(live, /outcome === 'save-unknown'\s*\? "Couldn't confirm whether the week was saved/);
+  assert.match(live, /: 'The week was saved, but starting the next one failed/);
+  assert.match(live, /outcome === 'save-failed'\)[\s\S]{0,80}?error\?\.message/, 'the rejection reason reaches the user');
+  assert.match(live, /outcome === 'done'\)[\s\S]{0,60}?location\.hash = '#\/pick'/);
 });
 
 // ── history templates, executed with the real domain slice ────────────
