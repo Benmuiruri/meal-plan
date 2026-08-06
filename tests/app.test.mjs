@@ -973,11 +973,15 @@ test('the save-week action gates the UI for the duration and maps every outcome'
   // messages are pinned INSIDE their branches — swapping them fails
   assert.match(live, /outcome === 'save-unknown'\s*\? "Couldn't confirm whether the week was saved/);
   assert.match(live, /: 'The week was saved, but starting the next one failed/);
-  assert.match(live, /outcome === 'dirty'\)[\s\S]{0,120}?alert\(/, 'a dirty week is told, not shrugged at');
+  // dirty deliberately has no dialog — the chip and banner are the single
+  // truthful voice for every failure class
+  assert.doesNotMatch(live, /outcome === 'dirty'/, 'no second voice contradicting the banner');
   assert.match(live, /outcome === 'save-failed'\)[\s\S]{0,80}?error\?\.message/, 'the rejection reason reaches the user');
   // done must not rely on a hashchange event that an equal hash never fires
-  // — all four statements, in order: route, detail, hash sync, paint
-  assert.match(live, /state\.route = 'pick';\s*state\.historyDetail = null;\s*history\.replaceState\(null, '', '#\/pick'\);\s*render\(\)/);
+  // — anchored to the done branch AND covering all four statements in order
+  assert.match(live,
+    /outcome === 'done'\)\s*\{[\s\S]{0,420}?state\.route = 'pick';\s*state\.historyDetail = null;\s*history\.replaceState\(null, '', '#\/pick'\);\s*render\(\)/,
+    'navigation belongs to done alone; dirty and save-failed stay on Summary');
 });
 
 // ── history templates, executed with the real domain slice ────────────
