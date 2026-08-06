@@ -496,17 +496,25 @@ function currentMonday() {
 
 const reducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-// A phone photo is 3–5MB; the card needs ~30–50KB. Downscale so the longest
-// edge fits 400px — width alone would let a tall screenshot through huge —
-// and re-encode as JPEG before anything leaves the device.
-async function resizeImage(file, maxEdge = 400) {
+// A phone photo is 3–5MB; the card needs ~30–50KB. Downscale to a pixel
+// budget — 0.12MP, the area of the plan's 400×300 card face — which bounds
+// file size and resolution together where an edge bound lets extreme aspect
+// ratios cheat one or the other. The byte and pixel caps refuse absurd
+// inputs honestly; the decode itself is the platform's memory to manage —
+// JS only learns the dimensions after it happens.
+const IMAGE_PIXEL_BUDGET = 400 * 300;
+async function resizeImage(file) {
   if (file.size > 20 * 1024 * 1024) {
     throw new Error('that image is too large — 20MB max');
   }
   const bmp = await createImageBitmap(file).catch(() => {
     throw new Error("couldn't read that image — try a JPEG or PNG");
   });
-  const scale = Math.min(1, maxEdge / Math.max(bmp.width, bmp.height));
+  if (bmp.width * bmp.height > 50e6) {
+    bmp.close();
+    throw new Error('that image has too many pixels — 50 megapixels max');
+  }
+  const scale = Math.min(1, Math.sqrt(IMAGE_PIXEL_BUDGET / (bmp.width * bmp.height)));
   const canvas = document.createElement('canvas');
   canvas.width = Math.round(bmp.width * scale);
   canvas.height = Math.round(bmp.height * scale);
@@ -584,6 +592,10 @@ function budgetTone({ budget, remaining }) {
 /* ================================================================
    5. DATA LAYER — every Supabase call lives here
    ================================================================ */
+// The one spelling of the bucket's public URL shape: seeding builds with it,
+// removeMealImage parses with it, and a test pins that getPublicUrl agrees.
+const MEAL_IMAGES_PUBLIC = '/storage/v1/object/public/meal-images/';
+
 const db = {
   client: null,
 
@@ -598,7 +610,7 @@ const db = {
   },
 
   async seedMeals(userId) {
-    const img = (f) => f ? `${CONFIG.SUPABASE_URL}/storage/v1/object/public/meal-images/${f}` : null;
+    const img = (f) => f ? `${CONFIG.SUPABASE_URL}${MEAL_IMAGES_PUBLIC}${f}` : null;
     const rows = [
       ...SEED_MAINS.map((m, i) => ({ user_id: userId, name: m.name, kind: 'main', tint: TINTS[i % TINTS.length], image_url: img(m.img) })),
       ...SEED_BREAKFASTS.map((m, i) => ({ user_id: userId, name: m.name, kind: 'breakfast', tint: TINTS[(i + 2) % TINTS.length], image_url: img(m.img) })),
@@ -682,7 +694,7 @@ const db = {
 
   // Reclaims the object when the meal insert it was uploaded for fails.
   async removeMealImage(publicUrl) {
-    const path = publicUrl.split('/meal-images/')[1];
+    const path = publicUrl.split(MEAL_IMAGES_PUBLIC)[1];
     if (!path) return;
     await this.client.storage.from('meal-images').remove([path]);
   },
@@ -926,8 +938,11 @@ function viewPick() {
       <div class="pick-grid">
         ${cards.map((m) => {
           const isPicked = picked.includes(m.id);
+          // onerror: a dead image URL degrades to the tinted name tile
+          // instead of a permanently blank face (error events don't bubble,
+          // so the delegated listeners can't cover this)
           const face = m.image_url
-            ? `<img src="${esc(m.image_url)}" alt="" loading="lazy"><span class="shade"></span>`
+            ? `<img src="${esc(m.image_url)}" alt="" loading="lazy" onerror="this.nextElementSibling?.remove();this.remove()"><span class="shade"></span>`
             : '';
           return `
             <button type="button" class="meal-card ${isPicked ? 'is-picked' : ''}"
@@ -1335,8 +1350,14 @@ document.addEventListener('submit', async (e) => {
     } catch (err) {
       state.addName = name; // the file input can't be refilled, but the name can
       state.errorMsg = `Couldn't save: ${err.message ?? 'no connection'}`;
-      // an upload whose meal never landed would otherwise sit orphaned forever
-      if (image_url) db.removeMealImage(image_url).catch(() => {});
+      // Reclaim only on a structured server rejection (it carries a code):
+      // that proves the insert never landed AND the connection is alive. A
+      // network unknown keeps the object — the response may have been lost
+      // AFTER the row was written, and a rare orphan is cheaper than
+      // deleting a photo a live meal points at.
+      if (image_url && err?.code) {
+        db.removeMealImage(image_url).catch((e) => console.warn('meal image orphaned:', image_url, e));
+      }
     }
     render();
   }

@@ -439,15 +439,20 @@ test('the lunch change glue trims typed text and deletes the override when empti
 // ── meal photo upload ──────────────────────────────────────────────────
 function fakeStorageClient({ failWith = null } = {}) {
   const uploads = [];
+  const removed = [];
   return {
     uploads,
+    removed,
     storage: {
       from: (bucket) => ({
         upload: async (path, blob, opts) => {
           uploads.push({ bucket, path, blob, opts });
           return failWith ? { data: null, error: failWith } : { data: { path }, error: null };
         },
-        getPublicUrl: (path) => ({ data: { publicUrl: `https://cdn.example/${bucket}/${path}` } }),
+        remove: async (paths) => { removed.push({ bucket, paths }); return { data: null, error: null }; },
+        // the URL shape supabase-js actually returns — the round-trip test
+        // below pins that removeMealImage's parsing agrees with it
+        getPublicUrl: (path) => ({ data: { publicUrl: `https://x.supabase.co/storage/v1/object/public/${bucket}/${path}` } }),
       }),
     },
   };
@@ -463,7 +468,15 @@ test('uploadMealImage stores a jpeg in meal-images and returns its public url', 
   assert.match(up.path, /^[0-9a-f-]{36}\.jpg$/, 'object name is a uuid, never the user filename');
   assert.equal(up.blob, blob);
   assert.equal(up.opts.contentType, 'image/jpeg');
-  assert.equal(url, `https://cdn.example/meal-images/${up.path}`);
+  assert.equal(url, `https://x.supabase.co/storage/v1/object/public/meal-images/${up.path}`);
+});
+
+test('a public url from uploadMealImage round-trips through removeMealImage to the same object', async () => {
+  db.client = fakeStorageClient();
+  const url = await db.uploadMealImage({});
+  await db.removeMealImage(url);
+  assert.equal(db.client.removed.length, 1);
+  assert.deepEqual(db.client.removed[0].paths, [db.client.uploads[0].path]);
 });
 
 test('uploadMealImage generates a fresh path per call — a retried upload cannot collide', async () => {
@@ -510,6 +523,9 @@ test('the add-meal submit glue nests the calls: upload takes the resized file, f
   assert.match(live, /await db\.uploadMealImage\(await resizeImage\(file\)\)/);
   assert.match(live, /db\.addMeal\(/);
   assert.match(live, /state\.addName = name/, 'a failed add must keep the typed name');
+  // reclaim is gated on a structured rejection: a network unknown may mean
+  // the row WAS written, and deleting then breaks a live meal's image
+  assert.match(live, /if \(image_url && err\?\.code\)/, 'reclaim must require a server rejection code');
   assert.match(live, /db\.removeMealImage\(image_url\)/, 'a failed add must reclaim its upload');
 });
 
@@ -543,7 +559,7 @@ async function withCanvasWorld({ w, h, blob = { type: 'image/jpeg' } }, run) {
   return world;
 }
 
-test('resizeImage scales the longest edge to 400 — width for landscape, height for tall shots', async () => {
+test('resizeImage scales a standard photo to the 400×300 pixel budget', async () => {
   await withCanvasWorld({ w: 800, h: 600 }, async (world) => {
     const out = await resizeImage({ size: 1000 });
     assert.equal(world.canvas.width, 400);
@@ -552,10 +568,15 @@ test('resizeImage scales the longest edge to 400 — width for landscape, height
     assert.equal(out.type, 'image/jpeg');
     assert.ok(world.closed, 'bitmap memory is released');
   });
+});
+
+test('resizeImage holds extreme aspect ratios to the same pixel budget', async () => {
   await withCanvasWorld({ w: 600, h: 6000 }, async (world) => {
     await resizeImage({ size: 1000 });
-    assert.equal(world.canvas.width, 40, 'a tall screenshot must not stay 400px wide and huge');
-    assert.equal(world.canvas.height, 400);
+    const { width, height } = world.canvas;
+    assert.ok(width * height <= 400 * 300 * 1.02, `a tall screenshot must fit the budget (got ${width}×${height})`);
+    assert.ok(Math.abs(height / width - 10) < 0.2, 'aspect ratio is preserved');
+    assert.ok(width < 400, 'the budget, not the width, is the bound');
   });
 });
 
@@ -572,6 +593,14 @@ test('resizeImage rejects a >20MB file before decoding it', async () => {
     await assert.rejects(resizeImage({ size: 21 * 1024 * 1024 }), /too large/);
   });
   assert.equal(world.decoded, 0, 'the oversized file must never reach createImageBitmap');
+});
+
+test('resizeImage refuses a >50MP decode before allocating a canvas for it', async () => {
+  await withCanvasWorld({ w: 10000, h: 6000 }, async (world) => {
+    await assert.rejects(resizeImage({ size: 1000 }), /megapixels/);
+    assert.equal(world.canvas, null, 'no canvas is created for a refused image');
+    assert.ok(world.closed, 'the decoded bitmap is still released');
+  });
 });
 
 test('resizeImage fails loudly when the canvas cannot encode', async () => {

@@ -15,12 +15,14 @@ const dataLayerBanner = html.lastIndexOf('/* =', html.indexOf('5. DATA LAYER'));
 assert.ok(start > 0 && dataLayerBanner > start, 'section markers found in index.html');
 
 const src = html.slice(start, dataLayerBanner) + `
-export { DAY_KEYS, PICK_TARGET, parseMoney, currentMonday, picksComplete,
-         reconcileDays, swapSlots, lunchFor, computeTotals, budgetTone };`;
+export { DAY_KEYS, PICK_TARGET, SEED_MAINS, SEED_BREAKFASTS, parseMoney,
+         currentMonday, picksComplete, reconcileDays, swapSlots, lunchFor,
+         computeTotals, budgetTone };`;
 
 const {
-  DAY_KEYS, PICK_TARGET, parseMoney, currentMonday, picksComplete,
-  reconcileDays, swapSlots, lunchFor, computeTotals, budgetTone,
+  DAY_KEYS, PICK_TARGET, SEED_MAINS, SEED_BREAKFASTS, parseMoney,
+  currentMonday, picksComplete, reconcileDays, swapSlots, lunchFor,
+  computeTotals, budgetTone,
 } = await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(src));
 
 const week = (over = {}) => ({
@@ -142,3 +144,21 @@ test('budgetTone: green at exactly 10% left, amber below, red past zero', () => 
 });
 
 test('PICK_TARGET is 7', () => assert.equal(PICK_TARGET, 7));
+
+test('seed meals are well-formed: unique names, bucket-shaped image names, ugali mains present', () => {
+  const all = [...SEED_MAINS, ...SEED_BREAKFASTS];
+  assert.equal(SEED_MAINS.length, 14);
+  assert.equal(SEED_BREAKFASTS.length, 15);
+  assert.equal(new Set(all.map((m) => m.name)).size, all.length, 'no duplicate names');
+  for (const m of all) {
+    assert.ok(m.name?.trim(), 'every seed has a name');
+    if (m.img !== undefined) {
+      // the object naming convention of the meal-images bucket — a space or
+      // uppercase here is a 404 that renders as a blank card face
+      assert.match(m.img, /^[a-z0-9-]+\.jpg$/, `${m.name}: "${m.img}" is not a bucket-shaped object name`);
+    }
+  }
+  assert.ok(SEED_BREAKFASTS.every((m) => m.img), 'every breakfast ships with its photo');
+  const mains = SEED_MAINS.map((m) => m.name);
+  assert.ok(mains.includes('Ugali + beef') && mains.includes('Ugali + mbuzi'));
+});

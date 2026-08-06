@@ -96,7 +96,7 @@ Every change writes to the current week's row, debounced at 800ms so typing a pr
 
 ### Images
 
-Adding a meal takes a photo upload. The browser resizes it so its longest edge fits 400px and re-encodes as JPEG (roughly 30–50KB, well inside the 1GB free tier) before it leaves your phone, stores it under a fresh uuid in the public Storage bucket `meal-images` (bucket, 512KB/JPEG-only caps, and policies live in `schema.sql`), and saves the public URL on the meal. The library's starting photos were bulk-loaded the same way (2026-08-06). An earlier revision took a pasted URL instead; that field is gone.
+Adding a meal takes a photo upload. The browser downscales it to a 0.12-megapixel budget — 400×300 for a standard photo; extreme aspect ratios shrink to the same area rather than cheating one dimension — re-encodes as JPEG (roughly 30–50KB, well inside the 1GB free tier), stores it under a fresh uuid in the public Storage bucket `meal-images` (bucket, 512KB/JPEG-only caps, and policies live in `schema.sql`), and saves the public URL on the meal. A dead image URL degrades to the coloured name tile. The library's starting photos were bulk-loaded the same way (2026-08-06). An earlier revision took a pasted URL instead; that field is gone.
 
 ---
 
