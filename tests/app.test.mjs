@@ -1167,6 +1167,7 @@ test('the edit sheet prefills the kept name, offers photo replace, archive and c
      ${html.slice(tmplStart, tmplEnd)}
      export { viewEditSheet, state as estate };`));
   const out = mod.viewEditSheet();
+  assert.match(out, /role="dialog" aria-modal="true"/, 'the sheet declares the modality inert enforces');
   assert.match(out, /id="form-editmeal"/);
   assert.match(out, /value="Kept &lt;edit&gt;"/, 'a failed save keeps the typed name, escaped');
   assert.match(out, /type="file"/);
@@ -1200,12 +1201,6 @@ test('openEditSheet seeds the sheet from the meal, closes the add sheet, lands f
   const ce = html.indexOf("'close-edit':");
   assert.ok(ce > 0, 'close-edit action found in index.html');
   assert.match(html.slice(ce, ce + 200), /state\.editId = null/);
-
-  // the sheets render from two sites now — mutual exclusion must be explicit,
-  // or Tab-to-the-grid + Enter stacks the add sheet under the edit sheet
-  const oa = html.indexOf("'open-add':");
-  assert.ok(oa > 0, 'open-add action found in index.html');
-  assert.match(html.slice(oa, oa + 160), /if \(state\.editId\) return/, 'one sheet at a time');
 });
 
 test('the long-press wiring: hold opens the editor, movement or release cancels, the trailing click dies in capture', () => {
@@ -1247,8 +1242,11 @@ test('a route change dismisses both sheets — except an editor whose request is
   // keeping the state is only half of it: the sheet must ride above every
   // screen, or leaving #/pick still visually dismisses an airborne edit
   const r = html.indexOf('function render()');
-  assert.match(html.slice(r, r + 900), /\(state\.editId \? viewEditSheet\(\) : ''\)/,
-    'the edit sheet renders at the root, not inside one screen');
+  const renderSrc = html.slice(r, html.indexOf('/* ---------- surgical', r));
+  assert.match(renderSrc, /const sheet = state\.editId \? viewEditSheet\(\)\s*: state\.addOpen \? viewAddSheet\(/,
+    'one root ternary: the sheets render above every screen and exclude each other structurally');
+  assert.match(renderSrc, /app\.innerHTML = sheet \? `<div inert>\$\{under\}<\/div>\$\{sheet\}` : under/,
+    'an open sheet walls the background off with inert — modal for keyboard, pointer and AT');
 });
 
 test('the edit sheet is single-flight: no dismiss, no double-fire while its request is airborne', () => {
@@ -1376,12 +1374,18 @@ test('the page links the manifest and an apple touch icon', () => {
   assert.match(html, /<link rel="apple-touch-icon" href="icons\/icon-180\.png">/);
 });
 
-test('keyboard focus is one treatment and no rule suppresses it', () => {
+test('every outline declaration is a sanctioned one — the focus ring cannot be suppressed', () => {
   assert.match(html, /:focus-visible \{ outline: 3px solid var\(--mustard\)/);
-  // a higher-specificity suppression in any spelling would silently defeat
-  // the global rule for exactly the users it exists for
-  assert.doesNotMatch(html, /outline(-width|-style|-color)?:\s*(none|hidden|transparent|0(px)?)\b/,
-    'nothing may re-suppress the focus outline');
+  // enumerating bad spellings lost four rounds running; this is the closed
+  // world instead — an outline not on this list fails, whatever it says
+  const sanctioned = new Set([
+    'outline: 3px solid var(--mustard)',
+    'outline-offset: 2px',
+    'outline-offset: -4px',
+  ]);
+  for (const decl of html.match(/outline[a-z-]*:[^;}]*/g) ?? []) {
+    assert.ok(sanctioned.has(decl.trim()), `unsanctioned outline declaration: ${decl.trim()}`);
+  }
 });
 
 test('the manifest is standalone, relative-scoped, and every icon it names is a real PNG of its declared size', async () => {

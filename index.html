@@ -1129,14 +1129,13 @@ function viewPick() {
             <span class="g-name">${esc(m.name)}</span>
             <button type="button" class="g-restore" data-action="restore-meal" data-id="${m.id}">Restore</button>
           </div>`).join('')}` : ''}
-      ${state.addOpen ? viewAddSheet(kind) : ''}
     </div>`;
 }
 
 function viewAddSheet(kind) {
   return `
     <div class="sheet-backdrop" data-action="close-add"></div>
-    <div class="sheet" role="dialog" aria-label="Add a ${kind}">
+    <div class="sheet" role="dialog" aria-modal="true" aria-label="Add a ${kind}">
       <h3>New ${kind}</h3>
       <form id="form-addmeal">
         <input class="field" type="text" name="name" placeholder="Name" required maxlength="80" autocomplete="off" value="${esc(state.addName)}">
@@ -1158,7 +1157,7 @@ function viewEditSheet() {
   if (!m) return '';
   return `
     <div class="sheet-backdrop" data-action="close-edit"></div>
-    <div class="sheet" role="dialog" aria-label="Edit ${esc(m.name)}">
+    <div class="sheet" role="dialog" aria-modal="true" aria-label="Edit ${esc(m.name)}">
       <h3>Edit ${esc(m.kind)}</h3>
       <form id="form-editmeal">
         <input class="field" type="text" name="name" placeholder="Name" required maxlength="80" autocomplete="off" value="${esc(state.editName)}">
@@ -1429,10 +1428,14 @@ function render() {
     case 'error':       app.innerHTML = viewError(); return;
   }
   const screens = { pick: viewPick, week: viewWeek, budget: viewBudget, summary: viewSummary, history: viewHistory };
-  // the edit sheet rides above every screen — a route change mid-request
-  // must not visually dismiss a sheet the single-flight gate holds open
-  app.innerHTML = viewHeader() + viewSaveErrorBanner() + screens[state.route]()
-    + (state.editId ? viewEditSheet() : '') + viewTabbar();
+  const under = viewHeader() + viewSaveErrorBanner() + screens[state.route]() + viewTabbar();
+  // one modal at a time, editor first — and inert walls the background off
+  // from keyboard, pointer and AT: the platform's modality, no hand-rolled
+  // focus trap. The editor rides above every screen, so a route change
+  // mid-request cannot visually dismiss it.
+  const sheet = state.editId ? viewEditSheet()
+    : state.addOpen ? viewAddSheet(state.pickTab === 'mains' ? 'main' : 'breakfast') : '';
+  app.innerHTML = sheet ? `<div inert>${under}</div>${sheet}` : under;
 }
 
 /* ---------- surgical updates (keep focus while typing) ---------- */
@@ -1495,7 +1498,6 @@ const actions = {
   },
 
   'open-add': () => {
-    if (state.editId) return; // one sheet at a time — Tab can reach the grid under the backdrop
     state.addOpen = true;
     state.addName = '';
     state.errorMsg = '';
