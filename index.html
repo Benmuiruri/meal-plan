@@ -1467,8 +1467,8 @@ function animateMoney(el, to) {
 /* ================================================================
    9. ACTIONS & EVENTS
    ================================================================ */
-// one meal request at a time: the edit sheet cannot be dismissed or
-// double-fired while its update is in flight
+// one meal request at a time, from the sheet or a Restore button: nothing
+// dismisses, double-fires, or opens the editor over an airborne update
 let mealEditInFlight = false;
 
 const actions = {
@@ -1495,6 +1495,7 @@ const actions = {
   },
 
   'open-add': () => {
+    if (state.editId) return; // one sheet at a time — Tab can reach the grid under the backdrop
     state.addOpen = true;
     state.addName = '';
     state.errorMsg = '';
@@ -1609,6 +1610,7 @@ const actions = {
       el.disabled = true; // dead while the request flies
       const row = await db.updateMeal(meal.id, { archived: false });
       Object.assign(meal, row);
+      state.errorMsg = ''; // a stale save failure must not outlive the restore that followed it
     } catch (err) {
       el.disabled = false;
       alert(`Couldn't restore: ${err.message ?? 'no connection'}`); // visible from grid list and sheet alike
@@ -1656,7 +1658,7 @@ let pressConsumed = false; // the hold fired — the trailing click is the same 
 
 function openEditSheet(id) {
   const meal = mealById(id);
-  if (!meal) return;
+  if (!meal || mealEditInFlight) return; // no opening the editor over an airborne meal request
   state.editId = id;
   state.editName = meal.name;
   state.addOpen = false;

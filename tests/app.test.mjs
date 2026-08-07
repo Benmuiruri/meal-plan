@@ -1147,6 +1147,8 @@ test('the restore action re-arms its button on failure and flips archived back o
     .replace(/\/\/[^\n]*/g, '');
   assert.match(live, /el\.disabled = true;[\s\S]{0,80}?await db\.updateMeal\(meal\.id, \{ archived: false \}\)/,
     'the button dies before the request flies');
+  assert.match(live, /Object\.assign\(meal, row\);\s*state\.errorMsg = ''/,
+    'a stale save failure must not outlive the restore that followed it');
   assert.match(live, /catch[\s\S]{0,120}?el\.disabled = false/, 'a failed restore re-arms the button');
 });
 
@@ -1189,6 +1191,7 @@ test('openEditSheet seeds the sheet from the meal, closes the add sheet, lands f
   const live = html.slice(s, e)
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/\/\/[^\n]*/g, '');
+  assert.match(live, /if \(!meal \|\| mealEditInFlight\) return/, 'no opening the editor over an airborne meal request');
   assert.match(live, /state\.editId = id/);
   assert.match(live, /state\.editName = meal\.name/);
   assert.match(live, /state\.addOpen = false/);
@@ -1197,6 +1200,12 @@ test('openEditSheet seeds the sheet from the meal, closes the add sheet, lands f
   const ce = html.indexOf("'close-edit':");
   assert.ok(ce > 0, 'close-edit action found in index.html');
   assert.match(html.slice(ce, ce + 200), /state\.editId = null/);
+
+  // the sheets render from two sites now — mutual exclusion must be explicit,
+  // or Tab-to-the-grid + Enter stacks the add sheet under the edit sheet
+  const oa = html.indexOf("'open-add':");
+  assert.ok(oa > 0, 'open-add action found in index.html');
+  assert.match(html.slice(oa, oa + 160), /if \(state\.editId\) return/, 'one sheet at a time');
 });
 
 test('the long-press wiring: hold opens the editor, movement or release cancels, the trailing click dies in capture', () => {
@@ -1371,7 +1380,8 @@ test('keyboard focus is one treatment and no rule suppresses it', () => {
   assert.match(html, /:focus-visible \{ outline: 3px solid var\(--mustard\)/);
   // a higher-specificity suppression in any spelling would silently defeat
   // the global rule for exactly the users it exists for
-  assert.doesNotMatch(html, /outline(-width|-style)?:\s*(none|0)[;\s}]/, 'nothing may re-suppress the focus outline');
+  assert.doesNotMatch(html, /outline(-width|-style|-color)?:\s*(none|hidden|transparent|0(px)?)\b/,
+    'nothing may re-suppress the focus outline');
 });
 
 test('the manifest is standalone, relative-scoped, and every icon it names is a real PNG of its declared size', async () => {
