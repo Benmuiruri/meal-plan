@@ -1037,3 +1037,189 @@ test('the history detail is read-only and totals the week it shows', () => {
   viewsMod.vstate.historyDetail = '1999-01-04';
   assert.match(viewsMod.viewHistory(), /No saved week for that date/);
 });
+
+// ── meal editing & archiving ───────────────────────────────────────────
+
+// meals-table fake: records update payloads and their filters
+function fakeMealsTable({ rows = [{ id: 'm1', name: 'Steak' }], failWith = null } = {}) {
+  const updates = [];
+  return {
+    updates,
+    from() {
+      const u = { payload: null, filters: [] };
+      const b = {
+        update(payload) { u.payload = payload; updates.push(u); return b; },
+        eq(col, val) { u.filters.push([col, val]); return b; },
+        select: () => b,
+        async then(resolve) {
+          resolve(failWith ? { data: null, error: failWith } : { data: rows, error: null });
+        },
+      };
+      return b;
+    },
+  };
+}
+
+test('updateMeal writes exactly the given fields to the named meal and returns its row', async () => {
+  db.client = fakeMealsTable({ rows: [{ id: 'm1', name: 'New name' }] });
+  const row = await db.updateMeal('m1', { name: 'New name' });
+  assert.deepEqual(db.client.updates[0].payload, { name: 'New name' });
+  assert.deepEqual(db.client.updates[0].filters, [['id', 'm1']]);
+  assert.equal(row.name, 'New name');
+});
+
+test('updateMeal reports a vanished meal in plain words, not a PostgREST shrug', async () => {
+  db.client = fakeMealsTable({ rows: [] });
+  await assert.rejects(db.updateMeal('m1', { archived: true }), /no longer exists/);
+});
+
+test('updateMeal surfaces server rejections', async () => {
+  db.client = fakeMealsTable({ failWith: { code: '42501', message: 'RLS says no' } });
+  await assert.rejects(db.updateMeal('m1', { name: 'X' }), (err) => err.code === '42501');
+});
+
+// archived meals must stay loaded: saved weeks resolve names through
+// state.meals, so filtering them out of the query blanks past menus
+function fakeLibraryClient({ meals = [], staples = [] } = {}) {
+  const tables = {};
+  return {
+    tables,
+    from(name) {
+      const t = (tables[name] = { filters: [] });
+      const rows = name === 'meals' ? meals : staples;
+      const b = {
+        select: () => b,
+        eq: (col, val) => { t.filters.push(['eq', col, val]); return b; },
+        order: (col, opts) => { t.filters.push(['order', col, opts?.ascending]); return b; },
+        async then(resolve) { resolve({ data: rows, error: null }); },
+      };
+      return b;
+    },
+  };
+}
+
+test('loadLibrary returns archived meals too — history needs their names', async () => {
+  const meals = [{ id: 'm1', archived: false }, { id: 'm2', archived: true }];
+  db.client = fakeLibraryClient({ meals, staples: [{ id: 's1' }] });
+  const lib = await db.loadLibrary();
+  assert.deepEqual(lib.meals, meals);
+  assert.deepEqual(db.client.tables.meals.filters, [['order', 'created_at', undefined]],
+    'no archived filter in the query — hiding is the pick grid’s job');
+});
+
+test('viewPick buries archived meals and writes the hidden gesture down', async () => {
+  const tmplStart = html.indexOf('function viewPick');
+  const tmplEnd = html.indexOf('function viewAddSheet');
+  assert.ok(tmplStart > 0 && tmplEnd > tmplStart, 'viewPick markers found in index.html');
+  const escStart = html.indexOf('const esc =');
+  const escEnd = html.indexOf('[c]));', escStart);
+  const mod = await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(
+    `const PICK_TARGET = 7;
+     const TINTS = ['#111'];
+     const state = { pickTab: 'mains', addOpen: false, editId: null,
+       week: { picks: { mains: [], breakfasts: [] } },
+       meals: [
+         { id: 'm1', kind: 'main', name: 'Alive', tint: '#123' },
+         { id: 'm2', kind: 'main', name: 'Buried', tint: '#123', archived: true },
+       ] };
+     ${html.slice(escStart, escEnd + '[c]));'.length)}
+     ${html.slice(tmplStart, tmplEnd)}
+     export { viewPick };`));
+  const out = mod.viewPick();
+  assert.match(out, /Alive/);
+  assert.doesNotMatch(out, /Buried/, 'archived meals leave the grid');
+  assert.match(out, /Hold a meal/, 'long-press is invisible — the hint is the only signpost');
+});
+
+test('the edit sheet prefills the kept name, offers photo replace, archive and cancel', async () => {
+  const tmplStart = html.indexOf('function viewEditSheet');
+  const tmplEnd = html.indexOf('/* ---------- Week');
+  assert.ok(tmplStart > 0 && tmplEnd > tmplStart, 'edit-sheet markers found in index.html');
+  const escStart = html.indexOf('const esc =');
+  const escEnd = html.indexOf('[c]));', escStart);
+  const mod = await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(
+    `const state = { editId: 'm1', editName: 'Kept <edit>', errorMsg: 'boom <err>' };
+     const mealById = (id) => (id === 'm1' ? { id: 'm1', kind: 'main', name: 'Steak' } : undefined);
+     ${html.slice(escStart, escEnd + '[c]));'.length)}
+     ${html.slice(tmplStart, tmplEnd)}
+     export { viewEditSheet, state as estate };`));
+  const out = mod.viewEditSheet();
+  assert.match(out, /id="form-editmeal"/);
+  assert.match(out, /value="Kept &lt;edit&gt;"/, 'a failed save keeps the typed name, escaped');
+  assert.match(out, /type="file"/);
+  assert.match(out, /accept="image\/\*"/);
+  assert.match(out, /data-action="archive-meal"/);
+  assert.match(out, /data-action="close-edit"/);
+  assert.match(out, /boom &lt;err&gt;/, 'failures surface inside the sheet, escaped');
+  mod.estate.editId = 'ghost';
+  assert.equal(mod.viewEditSheet(), '', 'an edit sheet for a vanished meal renders nothing');
+});
+
+test('openEditSheet seeds the sheet from the meal, closes the add sheet, lands focus in the name', () => {
+  const s = html.indexOf('function openEditSheet');
+  const e = html.indexOf("document.addEventListener('pointerdown'");
+  assert.ok(s > 0 && e > s, 'openEditSheet found in index.html');
+  const live = html.slice(s, e)
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/[^\n]*/g, '');
+  assert.match(live, /state\.editId = id/);
+  assert.match(live, /state\.editName = meal\.name/);
+  assert.match(live, /state\.addOpen = false/);
+  assert.match(live, /form-editmeal input\[name="name"\]/, 'focus lands in the name field');
+
+  const ce = html.indexOf("'close-edit':");
+  assert.ok(ce > 0, 'close-edit action found in index.html');
+  assert.match(html.slice(ce, ce + 200), /state\.editId = null/);
+});
+
+test('the long-press wiring: hold opens the editor, movement or release cancels, the trailing click dies in capture', () => {
+  const s = html.indexOf('const LONG_PRESS_MS');
+  const e = html.indexOf("document.addEventListener('input'");
+  assert.ok(s > 0 && e > s, 'long-press block found in index.html');
+  const live = html.slice(s, e)
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/[^\n]*/g, '');
+  assert.match(live, /closest\('\.meal-card\[data-id\]'\)/);
+  assert.match(live, /if \(e\.button !== 0\) return/, 'right-button holds belong to contextmenu');
+  assert.match(live, /setTimeout\([\s\S]{0,120}?LONG_PRESS_MS\)/, 'the hold is a timer, not a click');
+  assert.match(live, /Math\.hypot\([\s\S]{0,80}?\) > \d+\) cancelPress\(\)/, 'a scroll-sized move is not a hold');
+  assert.match(live, /addEventListener\('pointerup', cancelPress\)/);
+  assert.match(live, /addEventListener\('pointercancel', cancelPress\)/);
+  assert.match(live, /pressConsumed[\s\S]{0,160}?stopPropagation/, 'the trailing click must be swallowed');
+  assert.match(live, /\}, true\);/, 'the swallow must run in capture phase, ahead of the action delegate');
+  assert.match(live, /addEventListener\('contextmenu'/, 'Android long-press and desktop right-click arrive here');
+  assert.match(live, /openEditSheet\(/);
+});
+
+test('the archive action refuses a meal on this week’s menu, confirms, then flips archived', () => {
+  const hStart = html.indexOf("'archive-meal':");
+  const hEnd = html.indexOf("'retry-history':");
+  assert.ok(hStart > 0 && hEnd > hStart, 'archive-meal handler markers found in index.html');
+  const live = html.slice(hStart, hEnd)
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/[^\n]*/g, '');
+  assert.match(live, /picks\.mains\.includes\(meal\.id\) \|\|[\s\S]{0,60}?picks\.breakfasts\.includes\(meal\.id\)/,
+    'both pick lists guard the current draft');
+  assert.match(live, /unpick it first[\s\S]{0,220}?if \(!confirm\(/, 'guard first, question second');
+  assert.match(live, /db\.updateMeal\(meal\.id, \{ archived: true \}\)/);
+  assert.match(live, /catch[\s\S]{0,160}?errorMsg/, 'a failed archive stays in the sheet with its reason');
+});
+
+test('the edit submit glue uploads then updates, keeps failures in the sheet, never reclaims the replaced photo', () => {
+  const hStart = html.indexOf("if (form.id === 'form-editmeal')");
+  const hEnd = html.indexOf("if (form.id === 'form-additem')");
+  assert.ok(hStart > 0 && hEnd > hStart, 'edit-meal handler markers found in index.html');
+  const live = html.slice(hStart, hEnd)
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/[^\n]*/g, '');
+  assert.match(live, /await db\.uploadMealImage\(await resizeImage\(file\)\)/);
+  assert.match(live, /db\.updateMeal\(meal\.id, fields\)/);
+  assert.match(live, /if \(uploaded\) delete meal\.imageDead/, 'a fresh URL deserves a fresh chance');
+  assert.match(live, /Object\.assign\(meal, row\)/, 'the state object keeps its identity — picks point at it');
+  assert.match(live, /state\.editName = name/, 'a failed save keeps the typed name');
+  assert.match(live, /if \(uploaded && isServerRejection\(err\)\)/, 'reclaim goes through the tested discriminator');
+  assert.match(live, /db\.removeMealImage\(uploaded\)/, 'a provably dead update reclaims its fresh upload');
+  // seed meals share storage objects (mixed-vegetables.jpg serves two
+  // breakfasts) — a replaced URL is not an orphaned one
+  assert.doesNotMatch(live, /removeMealImage\(meal\.image_url\)/, 'the replaced photo must never be reclaimed');
+});

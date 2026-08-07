@@ -190,6 +190,8 @@ h2.screen-title {
   text-align: left; width: 100%;
   display: flex; align-items: flex-end;
   padding: 10px;
+  /* a long-press must reach our timer, not iOS's image callout or selection */
+  -webkit-touch-callout: none; -webkit-user-select: none; user-select: none;
 }
 .meal-card .name {
   font-family: var(--display); color: var(--chalk);
@@ -217,6 +219,7 @@ h2.screen-title {
   font-weight: 600; font-size: 14px; width: 100%;
 }
 .add-card .plus { font-size: 34px; line-height: 1; font-family: var(--display); }
+.pick-hint { color: var(--ink-dim); font-size: 12px; text-align: center; margin-top: 14px; }
 
 .sheet-backdrop { position: fixed; inset: 0; z-index: 40; background: rgba(23,20,15,0.5); }
 .sheet {
@@ -232,6 +235,12 @@ h2.screen-title {
   flex: 1; padding: 13px; border-radius: 10px;
   border: 2px solid var(--ink); font-weight: 700; font-size: 15px;
 }
+.btn-archive {
+  width: 100%; margin-top: 10px; padding: 11px; border-radius: 10px;
+  border: 2px solid var(--tomato); color: var(--tomato);
+  font-weight: 700; font-size: 14px;
+}
+.btn-archive:disabled { opacity: 0.55; }
 
 /* ================================================================
    6. WEEK — the painted board
@@ -640,9 +649,11 @@ const isServerRejection = (err) =>
 const db = {
   client: null,
 
+  // archived meals load too: saved weeks resolve names through state.meals,
+  // so dropping them here would blank every past menu they cooked
   async loadLibrary() {
     const [meals, staples] = await Promise.all([
-      this.client.from('meals').select('*').eq('archived', false).order('created_at'),
+      this.client.from('meals').select('*').order('created_at'),
       this.client.from('staples').select('*').order('sort_order'),
     ]);
     if (meals.error) throw meals.error;
@@ -743,6 +754,14 @@ const db = {
     return data;
   },
 
+  async updateMeal(mealId, fields) {
+    const { data, error } = await this.client.from('meals')
+      .update(fields).eq('id', mealId).select();
+    if (error) throw error;
+    if (!data || data.length === 0) throw new Error('that meal no longer exists — reload to resync');
+    return data[0];
+  },
+
   // The object name is a fresh uuid per attempt — never the user's filename,
   // and a skew-retry re-run can't collide with a half-finished earlier upload.
   async uploadMealImage(blob) {
@@ -816,6 +835,8 @@ const state = {
   lifted: null,       // { slot: 'dinner'|'breakfast', day: 'mon' }
   addOpen: false,
   addName: '',        // survives a failed add so only the photo needs re-picking
+  editId: null,       // meal under edit (opened by a long-press), or null
+  editName: '',       // survives a failed edit the way addName does
   history: null,      // saved weeks, newest first; null until first visit loads them
   historyError: '',
   historyDetail: null, // week_start of the open read-only week, from the hash
@@ -1050,7 +1071,7 @@ function viewError() {
 function viewPick() {
   const kind = state.pickTab === 'mains' ? 'main' : 'breakfast';
   const picked = state.week.picks[state.pickTab];
-  const cards = state.meals.filter((m) => m.kind === kind);
+  const cards = state.meals.filter((m) => m.kind === kind && !m.archived);
   return `
     <div class="screen">
       <div class="pick-toggle" role="tablist">
@@ -1081,7 +1102,8 @@ function viewPick() {
           <span class="plus">+</span><span>Add a ${kind}</span>
         </button>
       </div>
-      ${state.addOpen ? viewAddSheet(kind) : ''}
+      <p class="pick-hint">Hold a meal to edit or archive it.</p>
+      ${state.editId ? viewEditSheet() : state.addOpen ? viewAddSheet(kind) : ''}
     </div>`;
 }
 
@@ -1100,6 +1122,29 @@ function viewAddSheet(kind) {
           <button type="button" class="btn-quiet" data-action="close-add">Cancel</button>
           <button type="submit" class="btn-primary">Add</button>
         </div>
+        ${state.errorMsg ? `<p class="error" style="color:var(--tomato);font-size:13px;font-weight:600;margin-top:10px">${esc(state.errorMsg)}</p>` : ''}
+      </form>
+    </div>`;
+}
+
+function viewEditSheet() {
+  const m = mealById(state.editId);
+  if (!m) return '';
+  return `
+    <div class="sheet-backdrop" data-action="close-edit"></div>
+    <div class="sheet" role="dialog" aria-label="Edit ${esc(m.name)}">
+      <h3>Edit ${esc(m.kind)}</h3>
+      <form id="form-editmeal">
+        <input class="field" type="text" name="name" placeholder="Name" required maxlength="80" autocomplete="off" value="${esc(state.editName)}">
+        <label class="field field-file">
+          <span>New photo (optional — keeps the current one)</span>
+          <input type="file" name="image" accept="image/*">
+        </label>
+        <div class="row-btns">
+          <button type="button" class="btn-quiet" data-action="close-edit">Cancel</button>
+          <button type="submit" class="btn-primary">Save</button>
+        </div>
+        <button type="button" class="btn-archive" data-action="archive-meal">Archive — hide from new menus</button>
         ${state.errorMsg ? `<p class="error" style="color:var(--tomato);font-size:13px;font-weight:600;margin-top:10px">${esc(state.errorMsg)}</p>` : ''}
       </form>
     </div>`;
@@ -1419,6 +1464,7 @@ const actions = {
     $('#form-addmeal input[name="name"]')?.focus();
   },
   'close-add': () => { state.addOpen = false; state.addName = ''; state.errorMsg = ''; render(); },
+  'close-edit': () => { state.editId = null; state.editName = ''; state.errorMsg = ''; render(); },
 
   'lift': (el) => {
     const { day, slot } = el.dataset;
@@ -1487,6 +1533,28 @@ const actions = {
     }
   },
 
+  'archive-meal': async (el) => {
+    const meal = mealById(state.editId);
+    if (!meal) return;
+    if (state.week.picks.mains.includes(meal.id) || state.week.picks.breakfasts.includes(meal.id)) {
+      state.errorMsg = "It's on this week's menu — unpick it first, then archive.";
+      render();
+      return;
+    }
+    if (!confirm(`Archive ${meal.name}? It leaves the picking grid but keeps its place in past weeks.`)) return;
+    el.disabled = true; // dead for the duration; the render below rebuilds the sheet either way
+    try {
+      const row = await db.updateMeal(meal.id, { archived: true });
+      Object.assign(meal, row);
+      state.editId = null;
+      state.editName = '';
+      state.errorMsg = '';
+    } catch (err) {
+      state.errorMsg = `Couldn't archive: ${err.message ?? 'no connection'}`;
+    }
+    render();
+  },
+
   'retry-history': () => {
     state.historyError = '';
     render();
@@ -1501,6 +1569,64 @@ document.addEventListener('click', (e) => {
 
 // error events don't bubble — capture phase is the only delegated way in
 document.addEventListener('error', (e) => { markDeadImage(e.target); }, true);
+
+/* ---------- long-press opens the meal editor ---------- */
+const LONG_PRESS_MS = 500;
+let press = null;          // { x, y, timer } while a hold is possible
+let pressConsumed = false; // the hold fired — the trailing click is the same gesture
+
+function openEditSheet(id) {
+  const meal = mealById(id);
+  if (!meal) return;
+  state.editId = id;
+  state.editName = meal.name;
+  state.addOpen = false;
+  state.errorMsg = '';
+  render();
+  $('#form-editmeal input[name="name"]')?.focus();
+}
+
+function cancelPress() {
+  if (!press) return;
+  clearTimeout(press.timer);
+  press = null;
+}
+
+document.addEventListener('pointerdown', (e) => {
+  pressConsumed = false; // a new gesture forgets a swallow that never happened
+  if (e.button !== 0) return; // right-button holds belong to contextmenu
+  const card = e.target.closest('.meal-card[data-id]');
+  if (!card || state.editId) return;
+  const id = card.dataset.id;
+  press = {
+    x: e.clientX, y: e.clientY,
+    timer: setTimeout(() => { pressConsumed = true; openEditSheet(id); }, LONG_PRESS_MS),
+  };
+});
+document.addEventListener('pointermove', (e) => {
+  // fingers jitter in place — only a scroll-sized move breaks the hold
+  if (press && Math.hypot(e.clientX - press.x, e.clientY - press.y) > 12) cancelPress();
+});
+document.addEventListener('pointerup', cancelPress);
+document.addEventListener('pointercancel', cancelPress);
+
+// Android long-press arrives as contextmenu and desktop right-click means the
+// same thing; opening is idempotent, so the timer double-firing is harmless
+document.addEventListener('contextmenu', (e) => {
+  const card = e.target.closest('.meal-card[data-id]');
+  if (!card) return;
+  e.preventDefault();
+  openEditSheet(card.dataset.id);
+});
+
+// capture phase: the click that ends a hold must die before the action
+// delegate toggles the pick underneath the sheet
+document.addEventListener('click', (e) => {
+  if (!pressConsumed) return;
+  pressConsumed = false;
+  e.preventDefault();
+  e.stopPropagation();
+}, true);
 
 document.addEventListener('input', (e) => {
   const el = e.target;
@@ -1600,6 +1726,36 @@ document.addEventListener('submit', async (e) => {
         db.removeMealImage(image_url).catch((e) => console.warn('meal image orphaned:', image_url, e));
       } else if (image_url) {
         console.info('meal image kept, insert outcome unknown:', image_url);
+      }
+    }
+    render();
+  }
+
+  if (form.id === 'form-editmeal') {
+    const meal = mealById(state.editId);
+    const name = form.name.value.trim();
+    if (!meal || !name) return;
+    const file = form.image.files[0];
+    form.querySelector('button[type="submit"]').disabled = true; // an upload takes a beat — no double saves
+    let uploaded = null;
+    try {
+      uploaded = file ? await db.uploadMealImage(await resizeImage(file)) : null;
+      const fields = uploaded ? { name, image_url: uploaded } : { name };
+      const row = await db.updateMeal(meal.id, fields);
+      if (uploaded) delete meal.imageDead; // a fresh URL deserves a fresh chance
+      Object.assign(meal, row); // in place — picks and cards point at this object
+      state.editId = null;
+      state.editName = '';
+      state.errorMsg = '';
+    } catch (err) {
+      state.editName = name;
+      state.errorMsg = `Couldn't save: ${err.message ?? 'no connection'}`;
+      // reclaim only the fresh upload, and only on a server rejection; the
+      // replaced URL is never touched — seed meals share storage objects
+      if (uploaded && isServerRejection(err)) {
+        db.removeMealImage(uploaded).catch((e) => console.warn('meal image orphaned:', uploaded, e));
+      } else if (uploaded) {
+        console.info('meal image kept, update outcome unknown:', uploaded);
       }
     }
     render();
