@@ -3,10 +3,7 @@
 import { deflateSync } from 'node:zlib';
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-
-const outDir = process.argv[2];
-if (!outDir) throw new Error('usage: node make-icons.mjs <outdir>');
-mkdirSync(outDir, { recursive: true });
+import { pathToFileURL } from 'node:url';
 
 const crcTable = Array.from({ length: 256 }, (_, n) => {
   let c = n;
@@ -77,8 +74,16 @@ const supersampled = (size) => (x, y) => {
   return [Math.round(r / 9), Math.round(g / 9), Math.round(b / 9)];
 };
 
-for (const size of [180, 192, 512]) {
-  const file = join(outDir, `icon-${size}.png`);
-  writeFileSync(file, png(size, supersampled(size)));
-  console.log('wrote', file);
+export const renderIcon = (size) => png(size, supersampled(size));
+
+// importable for the suite's pixel-identity check; writes only when run directly
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const outDir = process.argv[2];
+  if (!outDir) throw new Error('usage: node tools/make-icons.mjs <outdir>');
+  mkdirSync(outDir, { recursive: true });
+  for (const size of [180, 192, 512]) {
+    const file = join(outDir, `icon-${size}.png`);
+    writeFileSync(file, renderIcon(size));
+    console.log('wrote', file);
+  }
 }

@@ -4,6 +4,7 @@
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { inflateSync } from 'node:zlib';
 
 // Minimal observable DOM: just enough for updateSaveBanner's insert/remove to
 // be visible to assertions, so deleting the banner wiring fails the suite.
@@ -1234,6 +1235,11 @@ test('a route change dismisses both sheets — except an editor whose request is
   // strand the failure message in a sheet that no longer renders
   assert.match(live,
     /state\.addOpen = false;\s*if \(!mealEditInFlight\) \{\s*state\.editId = null;\s*state\.editName = '';\s*\}/);
+  // keeping the state is only half of it: the sheet must ride above every
+  // screen, or leaving #/pick still visually dismisses an airborne edit
+  const r = html.indexOf('function render()');
+  assert.match(html.slice(r, r + 900), /\(state\.editId \? viewEditSheet\(\) : ''\)/,
+    'the edit sheet renders at the root, not inside one screen');
 });
 
 test('the edit sheet is single-flight: no dismiss, no double-fire while its request is airborne', () => {
@@ -1251,6 +1257,12 @@ test('the edit sheet is single-flight: no dismiss, no double-fire while its requ
   assert.match(em, /mealEditInFlight = true;\s*let uploaded = null;\s*try \{/,
     'only the throw-proof declaration sits between the arm and its try');
   assert.match(em, /finally \{\s*mealEditInFlight = false;\s*\}/, 'the gate releases on every path');
+  // the sheet's Restore button routes here too — ungated, it would race a
+  // concurrent Save on the same meal and clobber the rename locally
+  const rm = html.slice(html.indexOf("'restore-meal':"), html.indexOf("'delete-week':"));
+  assert.match(rm, /if \(!meal \|\| mealEditInFlight\) return/, 'restore is part of the same single flight');
+  assert.match(rm, /mealEditInFlight = true;\s*try \{/);
+  assert.match(rm, /finally \{\s*mealEditInFlight = false;\s*\}/);
 });
 
 test('the archive action refuses a meal on this week’s menu, confirms, then flips archived', () => {
@@ -1357,9 +1369,9 @@ test('the page links the manifest and an apple touch icon', () => {
 
 test('keyboard focus is one treatment and no rule suppresses it', () => {
   assert.match(html, /:focus-visible \{ outline: 3px solid var\(--mustard\)/);
-  // a higher-specificity outline:none would silently defeat the global rule
-  // for exactly the users it exists for
-  assert.doesNotMatch(html, /outline:\s*none/, 'nothing may re-suppress the focus outline');
+  // a higher-specificity suppression in any spelling would silently defeat
+  // the global rule for exactly the users it exists for
+  assert.doesNotMatch(html, /outline(-width|-style)?:\s*(none|0)[;\s}]/, 'nothing may re-suppress the focus outline');
 });
 
 test('the manifest is standalone, relative-scoped, and every icon it names is a real PNG of its declared size', async () => {
@@ -1371,7 +1383,6 @@ test('the manifest is standalone, relative-scoped, and every icon it names is a 
   const metaTheme = /name="theme-color" content="([^"]+)"/.exec(html)?.[1];
   assert.equal(manifest.theme_color, metaTheme, 'the manifest and the meta tag must agree on the theme colour');
   assert.ok(manifest.icons.some((i) => i.purpose === 'maskable'), 'Android needs a maskable icon');
-  await readFile(new URL('../tools/make-icons.mjs', import.meta.url)); // the icons' source must live in the tree
   for (const icon of manifest.icons) {
     const png = await readFile(new URL('../' + icon.src, import.meta.url));
     assert.deepEqual([...png.subarray(0, 8)], [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], `${icon.src} is a PNG`);
@@ -1382,4 +1393,26 @@ test('the manifest is standalone, relative-scoped, and every icon it names is a 
   // iOS reads its icon from the link tag, not the manifest — check it too
   const apple = await readFile(new URL('../icons/icon-180.png', import.meta.url));
   assert.equal(apple.readUInt32BE(16), 180);
+});
+
+test('the committed icons are pixel-identical to what tools/make-icons.mjs draws', async () => {
+  const { renderIcon } = await import('../tools/make-icons.mjs');
+  // compare decompressed scanlines, not files — deflate output may drift
+  // across node versions while the drawing stays the same
+  const rawPixels = (png) => {
+    let off = 8;
+    const idat = [];
+    while (off < png.length) {
+      const len = png.readUInt32BE(off);
+      const type = png.toString('ascii', off + 4, off + 8);
+      if (type === 'IDAT') idat.push(png.subarray(off + 8, off + 8 + len));
+      off += 12 + len;
+    }
+    return inflateSync(Buffer.concat(idat));
+  };
+  for (const size of [180, 192, 512]) {
+    const disk = await readFile(new URL(`../icons/icon-${size}.png`, import.meta.url));
+    assert.ok(rawPixels(disk).equals(rawPixels(renderIcon(size))),
+      `icon-${size}.png is exactly what its committed source draws`);
+  }
 });

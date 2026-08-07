@@ -1129,7 +1129,7 @@ function viewPick() {
             <span class="g-name">${esc(m.name)}</span>
             <button type="button" class="g-restore" data-action="restore-meal" data-id="${m.id}">Restore</button>
           </div>`).join('')}` : ''}
-      ${state.editId ? viewEditSheet() : state.addOpen ? viewAddSheet(kind) : ''}
+      ${state.addOpen ? viewAddSheet(kind) : ''}
     </div>`;
 }
 
@@ -1429,7 +1429,10 @@ function render() {
     case 'error':       app.innerHTML = viewError(); return;
   }
   const screens = { pick: viewPick, week: viewWeek, budget: viewBudget, summary: viewSummary, history: viewHistory };
-  app.innerHTML = viewHeader() + viewSaveErrorBanner() + screens[state.route]() + viewTabbar();
+  // the edit sheet rides above every screen — a route change mid-request
+  // must not visually dismiss a sheet the single-flight gate holds open
+  app.innerHTML = viewHeader() + viewSaveErrorBanner() + screens[state.route]()
+    + (state.editId ? viewEditSheet() : '') + viewTabbar();
 }
 
 /* ---------- surgical updates (keep focus while typing) ---------- */
@@ -1596,17 +1599,22 @@ const actions = {
     render();
   },
 
+  // shares the edit sheet's single flight: its Restore button routes here,
+  // and an ungated restore would race a concurrent Save on the same meal
   'restore-meal': async (el) => {
     const meal = mealById(el.dataset.id);
-    if (!meal) return;
-    el.disabled = true; // dead while the request flies
+    if (!meal || mealEditInFlight) return;
+    mealEditInFlight = true;
     try {
+      el.disabled = true; // dead while the request flies
       const row = await db.updateMeal(meal.id, { archived: false });
       Object.assign(meal, row);
     } catch (err) {
       el.disabled = false;
-      alert(`Couldn't restore: ${err.message ?? 'no connection'}`);
+      alert(`Couldn't restore: ${err.message ?? 'no connection'}`); // visible from grid list and sheet alike
       return;
+    } finally {
+      mealEditInFlight = false;
     }
     render();
   },
