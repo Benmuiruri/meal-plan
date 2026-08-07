@@ -1281,3 +1281,33 @@ test('the delete-week action confirms, deletes, drops the row from cache and ret
   assert.match(live, /catch[\s\S]{0,120}?el\.disabled = false/, 'a failed delete re-arms the button');
   assert.match(live, /alert\(/, 'a failed delete says so');
 });
+
+// ── installability: manifest, icons, keyboard focus ────────────────────
+
+test('the page links the manifest and an apple touch icon', () => {
+  assert.match(html, /<link rel="manifest" href="manifest\.webmanifest">/);
+  assert.match(html, /<link rel="apple-touch-icon" href="icons\/icon-180\.png">/);
+});
+
+test('keyboard focus has one loud treatment', () => {
+  assert.match(html, /:focus-visible \{ outline: 3px solid var\(--mustard\)/);
+});
+
+test('the manifest is standalone, relative-scoped, and every icon it names is a real PNG of its declared size', async () => {
+  const manifest = JSON.parse(await readFile(new URL('../manifest.webmanifest', import.meta.url), 'utf8'));
+  assert.equal(manifest.display, 'standalone');
+  assert.equal(manifest.start_url, './', 'Pages serves from a subpath — an absolute URL would escape it');
+  assert.equal(manifest.scope, './');
+  assert.equal(manifest.theme_color, '#1B5B9E');
+  assert.ok(manifest.icons.some((i) => i.purpose === 'maskable'), 'Android needs a maskable icon');
+  for (const icon of manifest.icons) {
+    const png = await readFile(new URL('../' + icon.src, import.meta.url));
+    assert.deepEqual([...png.subarray(0, 8)], [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], `${icon.src} is a PNG`);
+    const [w, h] = icon.sizes.split('x').map(Number);
+    assert.equal(png.readUInt32BE(16), w, `${icon.src} width matches its declaration`);
+    assert.equal(png.readUInt32BE(20), h, `${icon.src} height matches its declaration`);
+  }
+  // iOS reads its icon from the link tag, not the manifest — check it too
+  const apple = await readFile(new URL('../icons/icon-180.png', import.meta.url));
+  assert.equal(apple.readUInt32BE(16), 180);
+});

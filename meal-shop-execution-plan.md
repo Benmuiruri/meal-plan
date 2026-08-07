@@ -177,8 +177,8 @@ Supabase schema, magic link sign-in, seeding, save-failure handling, design toke
 **Phase 2 — the rest of the promise. Done 2026-08-06.**
 Save to history and the History screen (a fifth tab). Photo upload to Storage shipped a day early. Staple price memory was dropped, not deferred — §12 item 8.
 
-**Phase 3 — polish.**
-Library editing and archiving, delete a saved week, keyboard focus states, web manifest so it installs to your home screen with a proper icon.
+**Phase 3 — polish. Done 2026-08-07.**
+Library editing and archiving (hold a meal card), delete a saved week from its record, keyboard focus states, web manifest so it installs to your home screen with a proper icon — §12 item 10.
 
 ---
 
@@ -216,3 +216,4 @@ The sequence matters — auth emails (password resets) need to know your live UR
 7. Images (2026-08-06) — **upload, not URL**. The add-meal sheet takes a photo file, resized in-browser to 400px JPEG and stored in the public `meal-images` bucket. The household's downloaded photos were bulk-loaded and linked: all 15 breakfasts, plus pasta salad, matoke, and two new mains **Ugali + beef** and **Ugali + mbuzi**; "Nwaci + egg + avocado" was renamed **"Fried egg + nduma + avocado"**. The vegetables photo is shared by both vegetable combos. Remaining mains keep coloured tiles until photos are added.
 8. Staple price memory (2026-08-06) — **dropped, not deferred**. Quantities bought change week to week, so remembered prices would mislead more than help; prices are typed fresh each week. Ticking a staple still prefills its seed default as a starting hint.
 9. History (2026-08-06) — **fifth tab**, resolving where the History screen lives. The active week is the newest `weeks` row: a draft is resumed no matter how stale (saving is the household's ritual, not the calendar's), and saving starts the next draft per the Summary section.
+10. Library editing (2026-08-07) — **hold a meal card** to rename it, replace its photo, or archive it. Weeks reference meals by id, so a rename ripples into past menus (they are lookups, not snapshots) and archived meals stay loaded so history keeps their names — they only leave the picking grid. A meal on the current menu refuses to archive until unpicked. Replaced photos are never deleted from Storage: seed meals share objects (one vegetables photo serves two breakfasts), so a replaced URL is not an orphaned one. A saved week can be deleted from its History record — the one destructive act in the app, behind a confirm.

@@ -7,6 +7,8 @@
 <meta name="color-scheme" content="light">
 <title>Meal &amp; Shop</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🍲</text></svg>">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Anton&family=DM+Mono:wght@400;500&family=Work+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -50,6 +52,9 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 input, select { font: inherit; color: inherit; }
 a { color: inherit; text-decoration: none; }
 img { max-width: 100%; display: block; }
+
+/* keyboard focus: one loud treatment everywhere; pointer focus stays quiet */
+:focus-visible { outline: 3px solid var(--mustard); outline-offset: 2px; }
 
 .money { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 
@@ -114,6 +119,7 @@ h2.screen-title {
 }
 .tabbar a svg { width: 22px; height: 22px; }
 .tabbar a.is-active { color: var(--tomato); }
+.tabbar a:focus-visible { outline-offset: -4px; border-radius: 8px; }
 
 /* ================================================================
    4. STANDALONE CARDS (sign in, config, errors)
