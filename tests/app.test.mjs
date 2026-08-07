@@ -1107,7 +1107,7 @@ test('loadLibrary returns archived meals too — history needs their names', asy
     'no archived filter in the query — hiding is the pick grid’s job');
 });
 
-test('viewPick buries archived meals and writes the hidden gesture down', async () => {
+test('viewPick moves archived meals to a restore list — unless they are still picked', async () => {
   const tmplStart = html.indexOf('function viewPick');
   const tmplEnd = html.indexOf('function viewAddSheet');
   assert.ok(tmplStart > 0 && tmplEnd > tmplStart, 'viewPick markers found in index.html');
@@ -1117,18 +1117,36 @@ test('viewPick buries archived meals and writes the hidden gesture down', async 
     `const PICK_TARGET = 7;
      const TINTS = ['#111'];
      const state = { pickTab: 'mains', addOpen: false, editId: null,
-       week: { picks: { mains: [], breakfasts: [] } },
+       week: { picks: { mains: ['m3'], breakfasts: [] } },
        meals: [
          { id: 'm1', kind: 'main', name: 'Alive', tint: '#123' },
          { id: 'm2', kind: 'main', name: 'Buried', tint: '#123', archived: true },
+         { id: 'm3', kind: 'main', name: 'Stuck', tint: '#123', archived: true },
        ] };
      ${html.slice(escStart, escEnd + '[c]));'.length)}
      ${html.slice(tmplStart, tmplEnd)}
      export { viewPick };`));
   const out = mod.viewPick();
-  assert.match(out, /Alive/);
-  assert.doesNotMatch(out, /Buried/, 'archived meals leave the grid');
+  assert.match(out, /data-action="toggle-pick" data-id="m1"/);
+  assert.doesNotMatch(out, /data-action="toggle-pick" data-id="m2"/, 'archived meals leave the grid');
+  assert.match(out, /data-action="restore-meal" data-id="m2"/, 'and land in the restore list instead');
+  // another device can archive a meal this draft has picked — hiding the card
+  // would freeze the count at 7/7 with nothing left to unpick
+  assert.match(out, /data-action="toggle-pick" data-id="m3"/, 'a picked meal stays on the grid even archived');
+  assert.doesNotMatch(out, /data-action="restore-meal" data-id="m3"/, 'and is not listed twice');
   assert.match(out, /Hold a meal/, 'long-press is invisible — the hint is the only signpost');
+});
+
+test('the restore action re-arms its button on failure and flips archived back off', () => {
+  const hStart = html.indexOf("'restore-meal':");
+  const hEnd = html.indexOf("'delete-week':");
+  assert.ok(hStart > 0 && hEnd > hStart, 'restore-meal handler markers found in index.html');
+  const live = html.slice(hStart, hEnd)
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/[^\n]*/g, '');
+  assert.match(live, /el\.disabled = true;[\s\S]{0,80}?await db\.updateMeal\(meal\.id, \{ archived: false \}\)/,
+    'the button dies before the request flies');
+  assert.match(live, /catch[\s\S]{0,120}?el\.disabled = false/, 'a failed restore re-arms the button');
 });
 
 test('the edit sheet prefills the kept name, offers photo replace, archive and cancel', async () => {
@@ -1180,15 +1198,38 @@ test('the long-press wiring: hold opens the editor, movement or release cancels,
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/\/\/[^\n]*/g, '');
   assert.match(live, /closest\('\.meal-card\[data-id\]'\)/);
+  assert.match(live, /pressConsumed = false;\s*cancelPress\(\);/,
+    'every new gesture kills the previous hold — a second finger must not orphan a timer');
   assert.match(live, /if \(e\.button !== 0\) return/, 'right-button holds belong to contextmenu');
   assert.match(live, /setTimeout\([\s\S]{0,120}?LONG_PRESS_MS\)/, 'the hold is a timer, not a click');
   assert.match(live, /Math\.hypot\([\s\S]{0,80}?\) > \d+\) cancelPress\(\)/, 'a scroll-sized move is not a hold');
   assert.match(live, /addEventListener\('pointerup', cancelPress\)/);
   assert.match(live, /addEventListener\('pointercancel', cancelPress\)/);
-  assert.match(live, /pressConsumed[\s\S]{0,160}?stopPropagation/, 'the trailing click must be swallowed');
-  assert.match(live, /\}, true\);/, 'the swallow must run in capture phase, ahead of the action delegate');
+  // the capture flag is anchored to the swallow's own body — a listener
+  // elsewhere in the block cannot satisfy this pin
+  assert.match(live, /pressConsumed = false;\s*e\.preventDefault\(\);\s*e\.stopPropagation\(\);\s*\}, true\);/,
+    'the swallow itself must run in capture phase, ahead of the action delegate');
   assert.match(live, /addEventListener\('contextmenu'/, 'Android long-press and desktop right-click arrive here');
   assert.match(live, /openEditSheet\(/);
+});
+
+test('a route change dismisses both sheets — back-button must not leave the editor armed', () => {
+  const s = html.indexOf("window.addEventListener('hashchange'");
+  const e = html.indexOf("window.addEventListener('online'");
+  assert.ok(s > 0 && e > s, 'hashchange wiring found in index.html');
+  assert.match(html.slice(s, e), /state\.addOpen = false;\s*state\.editId = null;\s*state\.editName = ''/);
+});
+
+test('the edit sheet is single-flight: no dismiss, no double-fire while its request is airborne', () => {
+  const ce = html.indexOf("'close-edit':");
+  assert.match(html.slice(ce, ce + 220), /if \(mealEditInFlight\) return/,
+    'closing mid-flight would strand the failure message in a sheet that no longer renders');
+  const am = html.indexOf("'archive-meal':");
+  assert.match(html.slice(am, am + 220), /if \(!meal \|\| mealEditInFlight\) return/);
+  assert.match(html.slice(am, html.indexOf("'restore-meal':")), /mealEditInFlight = true/);
+  const em = html.slice(html.indexOf("if (form.id === 'form-editmeal')"), html.indexOf("if (form.id === 'form-additem')"));
+  assert.match(em, /if \(!meal \|\| !name \|\| mealEditInFlight\) return/);
+  assert.match(em, /finally \{\s*mealEditInFlight = false;\s*\}/, 'the gate releases on every path');
 });
 
 test('the archive action refuses a meal on this week’s menu, confirms, then flips archived', () => {
@@ -1274,10 +1315,14 @@ test('the delete-week action confirms, deletes, drops the row from cache and ret
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/\/\/[^\n]*/g, '');
   assert.match(live, /if \(!confirm\([\s\S]{0,120}?\)\) return/, 'no silent destruction');
-  assert.match(live, /el\.disabled = true;[\s\S]{0,80}?await db\.deleteWeek\(week\.id\)/,
-    'the button dies before the request flies');
-  assert.match(live, /state\.history = state\.history\.filter/, 'the cached list drops the record');
-  assert.match(live, /location\.hash = '#\/history'/, 'deletion lands back on the list');
+  assert.match(live, /confirm\([\s\S]{0,60}?fmtDate\(week\.week_start\)/,
+    'the destruction prompt names its target the way the app writes dates everywhere else');
+  // one anchor for the whole order: the cache drop and the navigation sit
+  // AFTER the await — moved above it, a failed delete would erase the row
+  // from the UI while the server kept it
+  assert.match(live,
+    /el\.disabled = true;[\s\S]{0,80}?await db\.deleteWeek\(week\.id\);\s*state\.history = state\.history\.filter[\s\S]{0,80}?location\.hash = '#\/history'/,
+    'disable → delete → drop from cache → navigate, in that order');
   assert.match(live, /catch[\s\S]{0,120}?el\.disabled = false/, 'a failed delete re-arms the button');
   assert.match(live, /alert\(/, 'a failed delete says so');
 });

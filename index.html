@@ -358,6 +358,8 @@ input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; marg
 .tick input:disabled + .box { opacity: 0.45; }
 
 .g-remove { color: var(--tomato); font-size: 20px; font-weight: 700; width: 26px; flex-shrink: 0; text-align: center; }
+.g-restore { border: 2px solid var(--ink); border-radius: 8px; padding: 5px 12px; font-weight: 700; font-size: 13px; flex-shrink: 0; }
+.g-restore:disabled { opacity: 0.4; }
 
 .add-item { display: flex; gap: 8px; margin-top: 12px; }
 .add-item input { padding: 10px 12px; border: 2px solid var(--ink); border-radius: 10px; background: #fff; font-size: 15px; min-width: 0; }
@@ -1085,7 +1087,10 @@ function viewError() {
 function viewPick() {
   const kind = state.pickTab === 'mains' ? 'main' : 'breakfast';
   const picked = state.week.picks[state.pickTab];
-  const cards = state.meals.filter((m) => m.kind === kind && !m.archived);
+  // a picked meal stays on the grid even archived (another device can archive
+  // mid-draft) — hiding it would freeze the count at 7 with no way to unpick
+  const cards = state.meals.filter((m) => m.kind === kind && (!m.archived || picked.includes(m.id)));
+  const archived = state.meals.filter((m) => m.kind === kind && m.archived && !picked.includes(m.id));
   return `
     <div class="screen">
       <div class="pick-toggle" role="tablist">
@@ -1117,6 +1122,13 @@ function viewPick() {
         </button>
       </div>
       <p class="pick-hint">Hold a meal to edit or archive it.</p>
+      ${archived.length ? `
+        <p class="list-title">Archived</p>
+        ${archived.map((m) => `
+          <div class="g-row">
+            <span class="g-name">${esc(m.name)}</span>
+            <button type="button" class="g-restore" data-action="restore-meal" data-id="${m.id}">Restore</button>
+          </div>`).join('')}` : ''}
       ${state.editId ? viewEditSheet() : state.addOpen ? viewAddSheet(kind) : ''}
     </div>`;
 }
@@ -1450,6 +1462,10 @@ function animateMoney(el, to) {
 /* ================================================================
    9. ACTIONS & EVENTS
    ================================================================ */
+// one meal request at a time: the edit sheet cannot be dismissed or
+// double-fired while its update is in flight
+let mealEditInFlight = false;
+
 const actions = {
   'pick-tab': (el) => {
     state.pickTab = el.dataset.tab;
@@ -1481,7 +1497,10 @@ const actions = {
     $('#form-addmeal input[name="name"]')?.focus();
   },
   'close-add': () => { state.addOpen = false; state.addName = ''; state.errorMsg = ''; render(); },
-  'close-edit': () => { state.editId = null; state.editName = ''; state.errorMsg = ''; render(); },
+  'close-edit': () => {
+    if (mealEditInFlight) return; // no dismissing a sheet whose request is airborne
+    state.editId = null; state.editName = ''; state.errorMsg = ''; render();
+  },
 
   'lift': (el) => {
     const { day, slot } = el.dataset;
@@ -1552,13 +1571,14 @@ const actions = {
 
   'archive-meal': async (el) => {
     const meal = mealById(state.editId);
-    if (!meal) return;
+    if (!meal || mealEditInFlight) return;
     if (state.week.picks.mains.includes(meal.id) || state.week.picks.breakfasts.includes(meal.id)) {
       state.errorMsg = "It's on this week's menu — unpick it first, then archive.";
       render();
       return;
     }
     if (!confirm(`Archive ${meal.name}? It leaves the picking grid but keeps its place in past weeks.`)) return;
+    mealEditInFlight = true;
     el.disabled = true; // dead for the duration; the render below rebuilds the sheet either way
     try {
       const row = await db.updateMeal(meal.id, { archived: true });
@@ -1568,6 +1588,23 @@ const actions = {
       state.errorMsg = '';
     } catch (err) {
       state.errorMsg = `Couldn't archive: ${err.message ?? 'no connection'}`;
+    } finally {
+      mealEditInFlight = false;
+    }
+    render();
+  },
+
+  'restore-meal': async (el) => {
+    const meal = mealById(el.dataset.id);
+    if (!meal) return;
+    el.disabled = true; // dead while the request flies
+    try {
+      const row = await db.updateMeal(meal.id, { archived: false });
+      Object.assign(meal, row);
+    } catch (err) {
+      el.disabled = false;
+      alert(`Couldn't restore: ${err.message ?? 'no connection'}`);
+      return;
     }
     render();
   },
@@ -1575,7 +1612,7 @@ const actions = {
   'delete-week': async (el) => {
     const week = state.history?.find((w) => w.id === el.dataset.id);
     if (!week) return;
-    if (!confirm(`Delete the week of ${week.week_start}? There's no undo.`)) return;
+    if (!confirm(`Delete the week of ${fmtDate(week.week_start)}? There's no undo.`)) return;
     el.disabled = true; // dead while the request flies
     try {
       await db.deleteWeek(week.id);
@@ -1626,6 +1663,7 @@ function cancelPress() {
 
 document.addEventListener('pointerdown', (e) => {
   pressConsumed = false; // a new gesture forgets a swallow that never happened
+  cancelPress(); // a second finger must kill the first hold, not orphan its timer
   if (e.button !== 0) return; // right-button holds belong to contextmenu
   const card = e.target.closest('.meal-card[data-id]');
   if (!card || state.editId) return;
@@ -1766,9 +1804,10 @@ document.addEventListener('submit', async (e) => {
   if (form.id === 'form-editmeal') {
     const meal = mealById(state.editId);
     const name = form.name.value.trim();
-    if (!meal || !name) return;
-    const file = form.image.files[0];
+    if (!meal || !name || mealEditInFlight) return;
+    mealEditInFlight = true;
     form.querySelector('button[type="submit"]').disabled = true; // an upload takes a beat — no double saves
+    const file = form.image.files[0];
     let uploaded = null;
     try {
       uploaded = file ? await db.uploadMealImage(await resizeImage(file)) : null;
@@ -1789,6 +1828,8 @@ document.addEventListener('submit', async (e) => {
       } else if (uploaded) {
         console.info('meal image kept, update outcome unknown:', uploaded);
       }
+    } finally {
+      mealEditInFlight = false;
     }
     render();
   }
@@ -1814,6 +1855,8 @@ window.addEventListener('hashchange', () => {
   state.historyDetail = detail;
   state.lifted = null;
   state.addOpen = false;
+  state.editId = null;
+  state.editName = '';
   if (route === 'history') loadHistory();
   if (state.phase === 'ready') render();
 });
