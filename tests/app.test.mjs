@@ -1156,8 +1156,10 @@ test('the edit sheet prefills the kept name, offers photo replace, archive and c
   const escStart = html.indexOf('const esc =');
   const escEnd = html.indexOf('[c]));', escStart);
   const mod = await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(
-    `const state = { editId: 'm1', editName: 'Kept <edit>', errorMsg: 'boom <err>' };
-     const mealById = (id) => (id === 'm1' ? { id: 'm1', kind: 'main', name: 'Steak' } : undefined);
+    `const state = { editId: 'm1', editName: 'Kept <edit>', errorMsg: 'boom <err>',
+       meals: [{ id: 'm1', kind: 'main', name: 'Steak' },
+               { id: 'm4', kind: 'main', name: 'Shelved', archived: true }] };
+     const mealById = (id) => state.meals.find((m) => m.id === id);
      ${html.slice(escStart, escEnd + '[c]));'.length)}
      ${html.slice(tmplStart, tmplEnd)}
      export { viewEditSheet, state as estate };`));
@@ -1169,6 +1171,12 @@ test('the edit sheet prefills the kept name, offers photo replace, archive and c
   assert.match(out, /data-action="archive-meal"/);
   assert.match(out, /data-action="close-edit"/);
   assert.match(out, /boom &lt;err&gt;/, 'failures surface inside the sheet, escaped');
+  // an archived meal can reach the sheet (picked-but-archived stays on the
+  // grid) — offering Archive there would instruct an impossible step
+  mod.estate.editId = 'm4';
+  const archOut = mod.viewEditSheet();
+  assert.doesNotMatch(archOut, /data-action="archive-meal"/, 'no archiving what is already archived');
+  assert.match(archOut, /data-action="restore-meal" data-id="m4"/, 'the sheet offers the true inverse');
   mod.estate.editId = 'ghost';
   assert.equal(mod.viewEditSheet(), '', 'an edit sheet for a vanished meal renders nothing');
 });
@@ -1198,8 +1206,10 @@ test('the long-press wiring: hold opens the editor, movement or release cancels,
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/\/\/[^\n]*/g, '');
   assert.match(live, /closest\('\.meal-card\[data-id\]'\)/);
-  assert.match(live, /pressConsumed = false;\s*cancelPress\(\);/,
-    'every new gesture kills the previous hold — a second finger must not orphan a timer');
+  // primary-only reset: a second finger must not disarm the first finger's
+  // pending swallow, but any new touch still kills a pending hold timer
+  assert.match(live, /if \(e\.isPrimary\) pressConsumed = false;\s*cancelPress\(\);/,
+    'a second finger must neither orphan a timer nor forget an armed swallow');
   assert.match(live, /if \(e\.button !== 0\) return/, 'right-button holds belong to contextmenu');
   assert.match(live, /setTimeout\([\s\S]{0,120}?LONG_PRESS_MS\)/, 'the hold is a timer, not a click');
   assert.match(live, /Math\.hypot\([\s\S]{0,80}?\) > \d+\) cancelPress\(\)/, 'a scroll-sized move is not a hold');
@@ -1213,11 +1223,17 @@ test('the long-press wiring: hold opens the editor, movement or release cancels,
   assert.match(live, /openEditSheet\(/);
 });
 
-test('a route change dismisses both sheets — back-button must not leave the editor armed', () => {
+test('a route change dismisses both sheets — except an editor whose request is airborne', () => {
   const s = html.indexOf("window.addEventListener('hashchange'");
   const e = html.indexOf("window.addEventListener('online'");
   assert.ok(s > 0 && e > s, 'hashchange wiring found in index.html');
-  assert.match(html.slice(s, e), /state\.addOpen = false;\s*state\.editId = null;\s*state\.editName = ''/);
+  const live = html.slice(s, e)
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/[^\n]*/g, '');
+  // unconditional dismissal here would bypass the single-flight guard and
+  // strand the failure message in a sheet that no longer renders
+  assert.match(live,
+    /state\.addOpen = false;\s*if \(!mealEditInFlight\) \{\s*state\.editId = null;\s*state\.editName = '';\s*\}/);
 });
 
 test('the edit sheet is single-flight: no dismiss, no double-fire while its request is airborne', () => {
@@ -1226,9 +1242,14 @@ test('the edit sheet is single-flight: no dismiss, no double-fire while its requ
     'closing mid-flight would strand the failure message in a sheet that no longer renders');
   const am = html.indexOf("'archive-meal':");
   assert.match(html.slice(am, am + 220), /if \(!meal \|\| mealEditInFlight\) return/);
-  assert.match(html.slice(am, html.indexOf("'restore-meal':")), /mealEditInFlight = true/);
+  // the arm sits flush against its try — a statement between them that threw
+  // would wedge the gate closed for the rest of the session
+  assert.match(html.slice(am, html.indexOf("'restore-meal':")), /mealEditInFlight = true;\s*try \{/,
+    'nothing runs between arming the gate and the try that releases it');
   const em = html.slice(html.indexOf("if (form.id === 'form-editmeal')"), html.indexOf("if (form.id === 'form-additem')"));
   assert.match(em, /if \(!meal \|\| !name \|\| mealEditInFlight\) return/);
+  assert.match(em, /mealEditInFlight = true;\s*let uploaded = null;\s*try \{/,
+    'only the throw-proof declaration sits between the arm and its try');
   assert.match(em, /finally \{\s*mealEditInFlight = false;\s*\}/, 'the gate releases on every path');
 });
 
@@ -1334,8 +1355,11 @@ test('the page links the manifest and an apple touch icon', () => {
   assert.match(html, /<link rel="apple-touch-icon" href="icons\/icon-180\.png">/);
 });
 
-test('keyboard focus has one loud treatment', () => {
+test('keyboard focus is one treatment and no rule suppresses it', () => {
   assert.match(html, /:focus-visible \{ outline: 3px solid var\(--mustard\)/);
+  // a higher-specificity outline:none would silently defeat the global rule
+  // for exactly the users it exists for
+  assert.doesNotMatch(html, /outline:\s*none/, 'nothing may re-suppress the focus outline');
 });
 
 test('the manifest is standalone, relative-scoped, and every icon it names is a real PNG of its declared size', async () => {
@@ -1343,8 +1367,11 @@ test('the manifest is standalone, relative-scoped, and every icon it names is a 
   assert.equal(manifest.display, 'standalone');
   assert.equal(manifest.start_url, './', 'Pages serves from a subpath — an absolute URL would escape it');
   assert.equal(manifest.scope, './');
-  assert.equal(manifest.theme_color, '#1B5B9E');
+  // pin the two real copies against each other instead of minting a third
+  const metaTheme = /name="theme-color" content="([^"]+)"/.exec(html)?.[1];
+  assert.equal(manifest.theme_color, metaTheme, 'the manifest and the meta tag must agree on the theme colour');
   assert.ok(manifest.icons.some((i) => i.purpose === 'maskable'), 'Android needs a maskable icon');
+  await readFile(new URL('../tools/make-icons.mjs', import.meta.url)); // the icons' source must live in the tree
   for (const icon of manifest.icons) {
     const png = await readFile(new URL('../' + icon.src, import.meta.url));
     assert.deepEqual([...png.subarray(0, 8)], [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], `${icon.src} is a PNG`);

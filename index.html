@@ -53,7 +53,8 @@ input, select { font: inherit; color: inherit; }
 a { color: inherit; text-decoration: none; }
 img { max-width: 100%; display: block; }
 
-/* keyboard focus: one loud treatment everywhere; pointer focus stays quiet */
+/* the one focus treatment — text fields match :focus-visible on any focus
+   (browser heuristic), buttons only from keyboard. Nothing may suppress it. */
 :focus-visible { outline: 3px solid var(--mustard); outline-offset: 2px; }
 
 .money { font-family: var(--mono); font-variant-numeric: tabular-nums; }
@@ -153,7 +154,6 @@ h2.screen-title {
   border: 2px solid var(--ink); border-radius: 10px;
   background: #fff; font-size: 16px;
 }
-.field:focus { outline: 3px solid var(--mustard); outline-offset: 1px; }
 .field-file { display: flex; flex-direction: column; gap: 6px; cursor: pointer; }
 .field-file > span { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink-dim); }
 .btn-primary {
@@ -241,12 +241,13 @@ h2.screen-title {
   flex: 1; padding: 13px; border-radius: 10px;
   border: 2px solid var(--ink); font-weight: 700; font-size: 15px;
 }
-.btn-archive {
+.btn-archive, .btn-restore {
   width: 100%; margin-top: 10px; padding: 11px; border-radius: 10px;
   border: 2px solid var(--tomato); color: var(--tomato);
   font-weight: 700; font-size: 14px;
 }
-.btn-archive:disabled { opacity: 0.55; }
+.btn-restore { border-color: var(--leaf); color: var(--leaf); }
+.btn-archive:disabled, .btn-restore:disabled { opacity: 0.55; }
 
 /* ================================================================
    6. WEEK — the painted board
@@ -291,7 +292,6 @@ h2.screen-title {
   color: var(--chalk); font: inherit; font-size: 13px; font-style: italic;
 }
 .slot--lunch .lunch-input::placeholder { color: var(--chalk-dim); opacity: 1; }
-.slot--lunch .lunch-input:focus { outline: 2px solid var(--mustard); outline-offset: 3px; }
 button.slot:active { background: rgba(251,246,234,0.12); }
 .slot.is-lifted {
   border-color: var(--mustard); background: rgba(242,178,27,0.14);
@@ -337,7 +337,7 @@ button.slot:active { background: rgba(251,246,234,0.12); }
   font-family: var(--mono); font-size: 15px;
   padding: 7px 8px; border: 2px solid var(--line); border-radius: 8px; background: #fff;
 }
-.g-row input.g-price:focus { border-color: var(--ink); outline: none; }
+.g-row input.g-price:focus { border-color: var(--ink); }
 .g-row input.g-price:disabled { background: transparent; border-color: transparent; }
 
 /* amounts are typed, never nudged — no spinner arrows on any number input */
@@ -1170,7 +1170,9 @@ function viewEditSheet() {
           <button type="button" class="btn-quiet" data-action="close-edit">Cancel</button>
           <button type="submit" class="btn-primary">Save</button>
         </div>
-        <button type="button" class="btn-archive" data-action="archive-meal">Archive — hide from new menus</button>
+        ${m.archived
+          ? `<button type="button" class="btn-restore" data-action="restore-meal" data-id="${m.id}">Restore to the picking grid</button>`
+          : '<button type="button" class="btn-archive" data-action="archive-meal">Archive — hide from new menus</button>'}
         ${state.errorMsg ? `<p class="error" style="color:var(--tomato);font-size:13px;font-weight:600;margin-top:10px">${esc(state.errorMsg)}</p>` : ''}
       </form>
     </div>`;
@@ -1579,8 +1581,8 @@ const actions = {
     }
     if (!confirm(`Archive ${meal.name}? It leaves the picking grid but keeps its place in past weeks.`)) return;
     mealEditInFlight = true;
-    el.disabled = true; // dead for the duration; the render below rebuilds the sheet either way
     try {
+      el.disabled = true; // dead for the duration; the render below rebuilds the sheet either way
       const row = await db.updateMeal(meal.id, { archived: true });
       Object.assign(meal, row);
       state.editId = null;
@@ -1662,8 +1664,10 @@ function cancelPress() {
 }
 
 document.addEventListener('pointerdown', (e) => {
-  pressConsumed = false; // a new gesture forgets a swallow that never happened
-  cancelPress(); // a second finger must kill the first hold, not orphan its timer
+  // primary only: a fresh gesture forgets a stale swallow, but a second
+  // finger must not disarm the first finger's pending one
+  if (e.isPrimary) pressConsumed = false;
+  cancelPress(); // any new touch kills a pending hold — two fingers is not a hold
   if (e.button !== 0) return; // right-button holds belong to contextmenu
   const card = e.target.closest('.meal-card[data-id]');
   if (!card || state.editId) return;
@@ -1806,10 +1810,10 @@ document.addEventListener('submit', async (e) => {
     const name = form.name.value.trim();
     if (!meal || !name || mealEditInFlight) return;
     mealEditInFlight = true;
-    form.querySelector('button[type="submit"]').disabled = true; // an upload takes a beat — no double saves
-    const file = form.image.files[0];
     let uploaded = null;
     try {
+      form.querySelector('button[type="submit"]').disabled = true; // an upload takes a beat — no double saves
+      const file = form.image.files[0];
       uploaded = file ? await db.uploadMealImage(await resizeImage(file)) : null;
       const fields = uploaded ? { name, image_url: uploaded } : { name };
       const row = await db.updateMeal(meal.id, fields);
@@ -1855,8 +1859,12 @@ window.addEventListener('hashchange', () => {
   state.historyDetail = detail;
   state.lifted = null;
   state.addOpen = false;
-  state.editId = null;
-  state.editName = '';
+  // an airborne edit keeps its sheet: dismissing here would bypass the
+  // single-flight guard and strand the failure message unseen
+  if (!mealEditInFlight) {
+    state.editId = null;
+    state.editName = '';
+  }
   if (route === 'history') loadHistory();
   if (state.phase === 'ready') render();
 });
