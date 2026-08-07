@@ -366,6 +366,7 @@ input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; marg
 .save-week-btn { width: 100%; margin-top: 18px; }
 
 .hist-back { display: inline-block; margin: 2px 0 10px; font-weight: 700; color: var(--blue); }
+.delete-week-btn { margin-top: 18px; }
 .hist-row {
   display: flex; align-items: center; justify-content: space-between; gap: 10px;
   padding: 14px 4px; border-bottom: 1px solid var(--line);
@@ -713,6 +714,13 @@ const db = {
       .eq('status', 'saved').order('week_start', { ascending: false });
     if (error) throw error;
     return data;
+  },
+
+  // zero matched rows is success (no error from PostgREST) — an
+  // already-gone week keeps the skew-retry re-run safe
+  async deleteWeek(weekId) {
+    const { error } = await this.client.from('weeks').delete().eq('id', weekId);
+    if (error) throw error;
   },
 
   async saveWeek(week) {
@@ -1383,6 +1391,9 @@ function viewHistoryDetail() {
             <span class="g-name">${esc(g.name)}</span>
             <span class="money">${fmtNum(g.price)}</span>
           </div>`).join('')}
+      <button type="button" class="btn-archive delete-week-btn" data-action="delete-week" data-id="${w.id}">
+        Delete this week's record
+      </button>
       ${viewTotals(w)}
     </div>`;
 }
@@ -1553,6 +1564,21 @@ const actions = {
       state.errorMsg = `Couldn't archive: ${err.message ?? 'no connection'}`;
     }
     render();
+  },
+
+  'delete-week': async (el) => {
+    const week = state.history?.find((w) => w.id === el.dataset.id);
+    if (!week) return;
+    if (!confirm(`Delete the week of ${week.week_start}? There's no undo.`)) return;
+    el.disabled = true; // dead while the request flies
+    try {
+      await db.deleteWeek(week.id);
+      state.history = state.history.filter((w) => w.id !== week.id);
+      location.hash = '#/history'; // a different hash, so the change event repaints the list
+    } catch (err) {
+      el.disabled = false;
+      alert(`Couldn't delete: ${err.message ?? 'no connection'}`);
+    }
   },
 
   'retry-history': () => {

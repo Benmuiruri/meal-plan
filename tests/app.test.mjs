@@ -1223,3 +1223,61 @@ test('the edit submit glue uploads then updates, keeps failures in the sheet, ne
   // breakfasts) — a replaced URL is not an orphaned one
   assert.doesNotMatch(live, /removeMealImage\(meal\.image_url\)/, 'the replaced photo must never be reclaimed');
 });
+
+// ── delete a saved week ────────────────────────────────────────────────
+
+function fakeDeleteTable({ failWith = null } = {}) {
+  const deletes = [];
+  return {
+    deletes,
+    from(name) {
+      const d = { table: name, filters: [] };
+      const b = {
+        delete() { deletes.push(d); return b; },
+        eq(col, val) { d.filters.push([col, val]); return b; },
+        async then(resolve) { resolve(failWith ? { data: null, error: failWith } : { data: null, error: null }); },
+      };
+      return b;
+    },
+  };
+}
+
+test('deleteWeek deletes exactly the named week and tolerates one already gone', async () => {
+  db.client = fakeDeleteTable();
+  await db.deleteWeek('w7');
+  assert.equal(db.client.deletes[0].table, 'weeks');
+  assert.deepEqual(db.client.deletes[0].filters, [['id', 'w7']]);
+  // PostgREST answers zero matched rows with no error — the re-run a skew
+  // retry performs must land here as success, not an exception
+  await db.deleteWeek('w7');
+  assert.equal(db.client.deletes.length, 2);
+});
+
+test('deleteWeek surfaces server rejections', async () => {
+  db.client = fakeDeleteTable({ failWith: { code: '42501', message: 'RLS says no' } });
+  await assert.rejects(db.deleteWeek('w7'), (err) => err.code === '42501');
+});
+
+test('the history detail offers deletion of exactly the shown week', () => {
+  viewsMod.vstate.history = [fullWeek()];
+  viewsMod.vstate.historyDetail = '2026-07-27';
+  assert.match(viewsMod.viewHistory(), /data-action="delete-week" data-id="w1"/);
+  viewsMod.vstate.historyDetail = null;
+  assert.doesNotMatch(viewsMod.viewHistory(), /data-action="delete-week"/, 'the list itself deletes nothing');
+});
+
+test('the delete-week action confirms, deletes, drops the row from cache and returns to the list', () => {
+  const hStart = html.indexOf("'delete-week':");
+  const hEnd = html.indexOf("'retry-history':");
+  assert.ok(hStart > 0 && hEnd > hStart, 'delete-week handler markers found in index.html');
+  const live = html.slice(hStart, hEnd)
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/[^\n]*/g, '');
+  assert.match(live, /if \(!confirm\([\s\S]{0,120}?\)\) return/, 'no silent destruction');
+  assert.match(live, /el\.disabled = true;[\s\S]{0,80}?await db\.deleteWeek\(week\.id\)/,
+    'the button dies before the request flies');
+  assert.match(live, /state\.history = state\.history\.filter/, 'the cached list drops the record');
+  assert.match(live, /location\.hash = '#\/history'/, 'deletion lands back on the list');
+  assert.match(live, /catch[\s\S]{0,120}?el\.disabled = false/, 'a failed delete re-arms the button');
+  assert.match(live, /alert\(/, 'a failed delete says so');
+});
