@@ -35,10 +35,10 @@ const src = html.slice(start, viewsBanner) + `
 function render() {}
 function viewSaveErrorBanner() { const k = state.saveErrorPermanent ? 'permanent' : 'transient'; return '<banner data-kind="' + k + '">' + k + '</banner>'; }
 export { state, db, scheduleSave, flushSave, signIn, resizeImage, isServerRejection,
-         markDeadImage, reviveDeadImages, performSaveWeek };`;
+         markDeadImage, reviveDeadImages, performSaveWeek, withCeiling, MEAL_REQUEST_CEILING_MS };`;
 
 const { state, db, scheduleSave, flushSave, signIn, resizeImage, isServerRejection,
-        markDeadImage, reviveDeadImages, performSaveWeek } =
+        markDeadImage, reviveDeadImages, performSaveWeek, withCeiling, MEAL_REQUEST_CEILING_MS } =
   await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(src));
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -520,6 +520,7 @@ test('the add-meal sheet offers a labelled file upload, not a URL field, and re-
      ${html.slice(tmplStart, tmplEnd)}
      export { viewAddSheet };`));
   const out = mod.viewAddSheet('main');
+  assert.match(out, /role="dialog" aria-modal="true"/, 'the sheet declares the modality inert enforces');
   assert.match(out, /type="file"/);
   assert.match(out, /accept="image\/\*"/);
   assert.match(out, /Photo \(optional\)/, 'the hint is visible text, not only an aria-label');
@@ -635,6 +636,7 @@ test('viewPick renders a live image and degrades a dead-flagged one to its tinte
   const mod = await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(
     `const PICK_TARGET = 7;
      const TINTS = ['#111'];
+     const KIND_FOR_TAB = { mains: 'main', breakfasts: 'breakfast' };
      const state = { pickTab: 'mains', addOpen: false,
        week: { picks: { mains: [], breakfasts: [] } },
        meals: [
@@ -1039,6 +1041,24 @@ test('the history detail is read-only and totals the week it shows', () => {
   assert.match(viewsMod.viewHistory(), /No saved week for that date/);
 });
 
+// ── the request ceiling ────────────────────────────────────────────────
+
+test('withCeiling rejects a request that never lands, and tells the user to reload', async () => {
+  const never = new Promise(() => {});
+  await assert.rejects(withCeiling(never, 20), /reload to see whether it saved/);
+});
+
+test('withCeiling passes a landed result straight through and stops its timer', async () => {
+  assert.equal(await withCeiling(Promise.resolve('landed'), 20), 'landed');
+  await assert.rejects(withCeiling(Promise.reject(new Error('refused')), 20), /refused/);
+  // an un-cleared ceiling timer would keep the event loop alive past the suite
+  await sleep(40);
+});
+
+test('the shipped ceiling is bounded and generous enough for a photo upload', () => {
+  assert.ok(MEAL_REQUEST_CEILING_MS >= 5000 && MEAL_REQUEST_CEILING_MS <= 30000, 'a usable, finite ceiling');
+});
+
 // ── meal editing & archiving ───────────────────────────────────────────
 
 // meals-table fake: records update payloads and their filters
@@ -1117,6 +1137,7 @@ test('viewPick moves archived meals to a restore list — unless they are still 
   const mod = await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(
     `const PICK_TARGET = 7;
      const TINTS = ['#111'];
+     const KIND_FOR_TAB = { mains: 'main', breakfasts: 'breakfast' };
      const state = { pickTab: 'mains', addOpen: false, editId: null,
        week: { picks: { mains: ['m3'], breakfasts: [] } },
        meals: [
@@ -1145,8 +1166,8 @@ test('the restore action re-arms its button on failure and flips archived back o
   const live = html.slice(hStart, hEnd)
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/\/\/[^\n]*/g, '');
-  assert.match(live, /el\.disabled = true;[\s\S]{0,80}?await db\.updateMeal\(meal\.id, \{ archived: false \}\)/,
-    'the button dies before the request flies');
+  assert.match(live, /el\.disabled = true;[\s\S]{0,100}?await withCeiling\(db\.updateMeal\(meal\.id, \{ archived: false \}\)\)/,
+    'the button dies before the request flies, and the request cannot outlive its ceiling');
   assert.match(live, /Object\.assign\(meal, row\);\s*state\.errorMsg = ''/,
     'a stale save failure must not outlive the restore that followed it');
   assert.match(live, /catch[\s\S]{0,120}?el\.disabled = false/, 'a failed restore re-arms the button');
@@ -1239,14 +1260,72 @@ test('a route change dismisses both sheets — except an editor whose request is
   // strand the failure message in a sheet that no longer renders
   assert.match(live,
     /state\.addOpen = false;\s*if \(!mealEditInFlight\) \{\s*state\.editId = null;\s*state\.editName = '';\s*\}/);
-  // keeping the state is only half of it: the sheet must ride above every
-  // screen, or leaving #/pick still visually dismisses an airborne edit
-  const r = html.indexOf('function render()');
-  const renderSrc = html.slice(r, html.indexOf('/* ---------- surgical', r));
-  assert.match(renderSrc, /const sheet = state\.editId \? viewEditSheet\(\)\s*: state\.addOpen \? viewAddSheet\(/,
-    'one root ternary: the sheets render above every screen and exclude each other structurally');
-  assert.match(renderSrc, /app\.innerHTML = sheet \? `<div inert>\$\{under\}<\/div>\$\{sheet\}` : under/,
-    'an open sheet walls the background off with inert — modal for keyboard, pointer and AT');
+});
+
+// ── render(), executed ─────────────────────────────────────────────────
+// The whole views section over the real constants/utilities/domain, so the
+// sheet/inert structure is checked by running it, not by grepping its source.
+const renderViewsStart = html.indexOf('const ICONS = {');
+const renderViewsEnd = html.indexOf('/* ---------- surgical');
+assert.ok(renderViewsStart > 0 && renderViewsEnd > renderViewsStart, 'views section markers found in index.html');
+const renderMod = await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(`
+  ${html.slice(domStart, domEnd)}
+  const state = { phase: 'ready', route: 'pick', pickTab: 'mains', saveStatus: 'saved',
+    saveErrorPermanent: false, errorMsg: '', loadingMsg: '', signinEmail: '',
+    addOpen: false, addName: '', editId: null, editName: '', lifted: null, staples: [],
+    history: null, historyError: '', historyDetail: null,
+    meals: [{ id: 'm1', kind: 'main', name: 'Steak', tint: '#123' }],
+    week: { id: 'w1', week_start: '2026-08-03', budget: null,
+            picks: { mains: [], breakfasts: [] }, days: {}, groceries: [] } };
+  const mealById = (id) => state.meals.find((m) => m.id === id);
+  const mealName = (id) => mealById(id)?.name ?? '—';
+  ${html.slice(renderViewsStart, renderViewsEnd)}
+  export { state as rstate, render };`));
+
+// render() reaches #app through the $ helper, i.e. document.querySelector
+function renderToHtml() {
+  const app = { innerHTML: '' };
+  const real = globalThis.document.querySelector;
+  globalThis.document.querySelector = (sel) => (sel === '#app' ? app : real(sel));
+  try {
+    renderMod.render();
+  } finally {
+    globalThis.document.querySelector = real;
+  }
+  return app.innerHTML;
+}
+
+test('render puts exactly one sheet on screen and makes the background inert', () => {
+  const s = renderMod.rstate;
+  s.editId = null; s.addOpen = false;
+  const plain = renderToHtml();
+  assert.doesNotMatch(plain, /<div inert>/, 'no sheet, no wall');
+  assert.match(plain, /class="tabbar"/, 'the background is the page itself');
+
+  s.addOpen = true;
+  const add = renderToHtml();
+  assert.match(add, /<div inert>[\s\S]*class="tabbar"[\s\S]*<\/div>/, 'the whole page goes behind the wall');
+  assert.match(add, /id="form-addmeal"/, 'state.addOpen alone puts the add sheet in the DOM');
+  assert.match(add.slice(add.indexOf('</div>')), /aria-modal="true"/, 'the sheet outside the wall declares modality');
+
+  // both flags set: the editor wins and only one dialog exists — the case a
+  // per-action guard used to cover and the root ternary now makes structural
+  s.editId = 'm1'; s.editName = 'Steak';
+  const both = renderToHtml();
+  assert.equal((both.match(/role="dialog"/g) ?? []).length, 1, 'never two stacked sheets');
+  assert.match(both, /id="form-editmeal"/);
+  assert.doesNotMatch(both, /id="form-addmeal"/, 'the editor wins');
+  s.editId = null; s.editName = ''; s.addOpen = false;
+});
+
+test('render keeps the editor above every screen, not inside the pick grid', () => {
+  const s = renderMod.rstate;
+  s.editId = 'm1'; s.editName = 'Steak';
+  for (const route of ['pick', 'budget', 'summary', 'history']) {
+    s.route = route;
+    assert.match(renderToHtml(), /id="form-editmeal"/, `an airborne edit survives the ${route} route`);
+  }
+  s.route = 'pick'; s.editId = null; s.editName = '';
 });
 
 test('the edit sheet is single-flight: no dismiss, no double-fire while its request is airborne', () => {
@@ -1282,7 +1361,7 @@ test('the archive action refuses a meal on this week’s menu, confirms, then fl
   assert.match(live, /picks\.mains\.includes\(meal\.id\) \|\|[\s\S]{0,60}?picks\.breakfasts\.includes\(meal\.id\)/,
     'both pick lists guard the current draft');
   assert.match(live, /unpick it first[\s\S]{0,220}?if \(!confirm\(/, 'guard first, question second');
-  assert.match(live, /db\.updateMeal\(meal\.id, \{ archived: true \}\)/);
+  assert.match(live, /withCeiling\(db\.updateMeal\(meal\.id, \{ archived: true \}\)\)/);
   assert.match(live, /catch[\s\S]{0,160}?errorMsg/, 'a failed archive stays in the sheet with its reason');
 });
 
@@ -1293,8 +1372,10 @@ test('the edit submit glue uploads then updates, keeps failures in the sheet, ne
   const live = html.slice(hStart, hEnd)
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/\/\/[^\n]*/g, '');
-  assert.match(live, /await db\.uploadMealImage\(await resizeImage\(file\)\)/);
-  assert.match(live, /db\.updateMeal\(meal\.id, fields\)/);
+  // every gated request carries a ceiling: the inert background makes this
+  // gate app-wide, so a hung request must not become a frozen app
+  assert.match(live, /await withCeiling\(db\.uploadMealImage\(await resizeImage\(file\)\)\)/);
+  assert.match(live, /await withCeiling\(db\.updateMeal\(meal\.id, fields\)\)/);
   assert.match(live, /if \(uploaded\) delete meal\.imageDead/, 'a fresh URL deserves a fresh chance');
   assert.match(live, /Object\.assign\(meal, row\)/, 'the state object keeps its identity — picks point at it');
   assert.match(live, /state\.editName = name/, 'a failed save keeps the typed name');
@@ -1377,15 +1458,21 @@ test('the page links the manifest and an apple touch icon', () => {
 test('every outline declaration is a sanctioned one — the focus ring cannot be suppressed', () => {
   assert.match(html, /:focus-visible \{ outline: 3px solid var\(--mustard\)/);
   // enumerating bad spellings lost four rounds running; this is the closed
-  // world instead — an outline not on this list fails, whatever it says
+  // world instead — an outline not on this list fails, whatever it says.
+  // Whitespace-insensitive, so reformatting a legitimate rule stays green.
+  const squash = (s) => s.replace(/\s+/g, '');
   const sanctioned = new Set([
-    'outline: 3px solid var(--mustard)',
-    'outline-offset: 2px',
-    'outline-offset: -4px',
-  ]);
-  for (const decl of html.match(/outline[a-z-]*:[^;}]*/g) ?? []) {
-    assert.ok(sanctioned.has(decl.trim()), `unsanctioned outline declaration: ${decl.trim()}`);
+    'outline:3pxsolidvar(--mustard)',
+    'outline-offset:2px',
+    'outline-offset:-4px',
+  ].map(squash));
+  for (const decl of html.match(/outline[a-z-]*\s*:[^;}]*/g) ?? []) {
+    assert.ok(sanctioned.has(squash(decl)), `unsanctioned outline declaration: ${decl.trim()}`);
   }
+  // the ring also dies to a reset shorthand or a JS assignment, neither of
+  // which is an outline declaration
+  assert.doesNotMatch(html, /\ball\s*:\s*(unset|revert|initial|revert-layer)\b/, 'a reset shorthand would wipe the ring');
+  assert.doesNotMatch(html, /style\.outline/, 'the ring must not be assignable from script');
 });
 
 test('the manifest is standalone, relative-scoped, and every icon it names is a real PNG of its declared size', async () => {

@@ -446,6 +446,9 @@ const DAY_KEYS  = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_NAMES = { mon:'Monday', tue:'Tuesday', wed:'Wednesday', thu:'Thursday', fri:'Friday', sat:'Saturday', sun:'Sunday' };
 const TINTS = ['#1B5B9E', '#E23E2C', '#2E7D46', '#F2B21B'];
 const PICK_TARGET = 7;
+// the one mapping from pick tab to meal kind — the sheet's label and the kind
+// its submit inserts must never be derived separately
+const KIND_FOR_TAB = { mains: 'main', breakfasts: 'breakfast' };
 
 // img names an object in the public meal-images Storage bucket, so a fresh
 // seed produces the same illustrated library that production carries.
@@ -544,6 +547,18 @@ function currentRoute() {
 }
 
 const reducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+// A request behind a gate that walls off an inert background must not run
+// forever, or a reload is the only way out. The abandoned request may still
+// land, hence "reload to see" rather than a retry promise.
+const MEAL_REQUEST_CEILING_MS = 15000;
+function withCeiling(promise, ms = MEAL_REQUEST_CEILING_MS) {
+  let timer;
+  const ceiling = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error('that took too long — reload to see whether it saved')), ms);
+  });
+  return Promise.race([promise, ceiling]).finally(() => clearTimeout(timer));
+}
 
 // Downscale to a 0.12MP pixel budget (400×300-ish) before upload: bounds file
 // size AND resolution where an edge bound lets extreme aspect ratios cheat.
@@ -1085,7 +1100,7 @@ function viewError() {
 /* ---------- Pick ---------- */
 
 function viewPick() {
-  const kind = state.pickTab === 'mains' ? 'main' : 'breakfast';
+  const kind = KIND_FOR_TAB[state.pickTab];
   const picked = state.week.picks[state.pickTab];
   // a picked meal stays on the grid even archived (another device can archive
   // mid-draft) — hiding it would freeze the count at 7 with no way to unpick
@@ -1434,7 +1449,7 @@ function render() {
   // focus trap. The editor rides above every screen, so a route change
   // mid-request cannot visually dismiss it.
   const sheet = state.editId ? viewEditSheet()
-    : state.addOpen ? viewAddSheet(state.pickTab === 'mains' ? 'main' : 'breakfast') : '';
+    : state.addOpen ? viewAddSheet(KIND_FOR_TAB[state.pickTab]) : '';
   app.innerHTML = sheet ? `<div inert>${under}</div>${sheet}` : under;
 }
 
@@ -1589,7 +1604,7 @@ const actions = {
     mealEditInFlight = true;
     try {
       el.disabled = true; // dead for the duration; the render below rebuilds the sheet either way
-      const row = await db.updateMeal(meal.id, { archived: true });
+      const row = await withCeiling(db.updateMeal(meal.id, { archived: true }));
       Object.assign(meal, row);
       state.editId = null;
       state.editName = '';
@@ -1610,7 +1625,7 @@ const actions = {
     mealEditInFlight = true;
     try {
       el.disabled = true; // dead while the request flies
-      const row = await db.updateMeal(meal.id, { archived: false });
+      const row = await withCeiling(db.updateMeal(meal.id, { archived: false }));
       Object.assign(meal, row);
       state.errorMsg = ''; // a stale save failure must not outlive the restore that followed it
     } catch (err) {
@@ -1648,6 +1663,13 @@ const actions = {
 document.addEventListener('click', (e) => {
   const el = e.target.closest('[data-action]');
   if (el) actions[el.dataset.action]?.(el);
+});
+
+// Escape is the keyboard way out of a sheet — the in-flight guards still hold
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  if (state.editId) actions['close-edit']();
+  else if (state.addOpen) actions['close-add']();
 });
 
 // error events don't bubble — capture phase is the only delegated way in
@@ -1791,7 +1813,7 @@ document.addEventListener('submit', async (e) => {
   if (form.id === 'form-addmeal') {
     const name = form.name.value.trim();
     if (!name) return;
-    const kind = state.pickTab === 'mains' ? 'main' : 'breakfast';
+    const kind = KIND_FOR_TAB[state.pickTab];
     const tint = TINTS[state.meals.length % TINTS.length];
     const file = form.image.files[0];
     form.querySelector('button[type="submit"]').disabled = true; // an upload takes a beat — no double adds
@@ -1826,9 +1848,9 @@ document.addEventListener('submit', async (e) => {
     try {
       form.querySelector('button[type="submit"]').disabled = true; // an upload takes a beat — no double saves
       const file = form.image.files[0];
-      uploaded = file ? await db.uploadMealImage(await resizeImage(file)) : null;
+      uploaded = file ? await withCeiling(db.uploadMealImage(await resizeImage(file))) : null;
       const fields = uploaded ? { name, image_url: uploaded } : { name };
-      const row = await db.updateMeal(meal.id, fields);
+      const row = await withCeiling(db.updateMeal(meal.id, fields));
       if (uploaded) delete meal.imageDead; // a fresh URL deserves a fresh chance
       Object.assign(meal, row); // in place — picks and cards point at this object
       state.editId = null;
