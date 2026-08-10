@@ -549,13 +549,17 @@ function currentRoute() {
 const reducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 // A request behind a gate that walls off an inert background must not run
-// forever, or a reload is the only way out. The abandoned request may still
-// land, hence "reload to see" rather than a retry promise.
+// forever, or a reload is the only way out. Abandoning is not cancelling —
+// timedOut marks an outcome only a resync can settle.
 const MEAL_REQUEST_CEILING_MS = 15000;
 function withCeiling(promise, ms = MEAL_REQUEST_CEILING_MS) {
   let timer;
   const ceiling = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error('that took too long — reload to see whether it saved')), ms);
+    timer = setTimeout(() => {
+      const slow = new Error('it took too long to answer');
+      slow.timedOut = true;
+      reject(slow);
+    }, ms);
   });
   return Promise.race([promise, ceiling]).finally(() => clearTimeout(timer));
 }
@@ -810,6 +814,10 @@ const db = {
     await this.client.storage.from('meal-images').remove([path]);
   },
 };
+
+// Resize and upload as one step, so a ceiling covers the decode too — on a
+// phone the decode and canvas encode are the slowest part of adding a photo.
+const uploadPhoto = async (file) => db.uploadMealImage(await resizeImage(file));
 
 // Supabase node clock skew can reject a fresh token as "issued at future";
 // the message is the discriminator (PGRST303 alone also covers expired).
@@ -1485,9 +1493,24 @@ function animateMoney(el, to) {
 /* ================================================================
    9. ACTIONS & EVENTS
    ================================================================ */
-// one meal request at a time, from the sheet or a Restore button: nothing
-// dismisses, double-fires, or opens the editor over an airborne update
-let mealEditInFlight = false;
+// one meal write at a time, from either sheet or a Restore button: nothing
+// dismisses, double-fires, or opens the editor over an airborne write
+let mealWriteInFlight = false;
+
+// A timed-out write is abandoned, not cancelled — it may still land. Freeing
+// the sheet would let a second write race it, so the app locks into a resync,
+// which is the only thing that can tell what the server actually holds.
+function lockOnUnknownWrite(err) {
+  if (!err?.timedOut) return false;
+  state.editId = null;
+  state.editName = '';
+  state.addOpen = false;
+  state.addName = '';
+  state.phase = 'error';
+  state.errorMsg = "Couldn't tell whether that saved — it took too long to answer. Tap Try again to read the truth from Supabase.";
+  render();
+  return true;
+}
 
 const actions = {
   'pick-tab': (el) => {
@@ -1519,9 +1542,12 @@ const actions = {
     render();
     $('#form-addmeal input[name="name"]')?.focus();
   },
-  'close-add': () => { state.addOpen = false; state.addName = ''; state.errorMsg = ''; render(); },
+  'close-add': () => {
+    if (mealWriteInFlight) return; // no dismissing a sheet whose write is airborne
+    state.addOpen = false; state.addName = ''; state.errorMsg = ''; render();
+  },
   'close-edit': () => {
-    if (mealEditInFlight) return; // no dismissing a sheet whose request is airborne
+    if (mealWriteInFlight) return; // no dismissing a sheet whose request is airborne
     state.editId = null; state.editName = ''; state.errorMsg = ''; render();
   },
 
@@ -1594,14 +1620,14 @@ const actions = {
 
   'archive-meal': async (el) => {
     const meal = mealById(state.editId);
-    if (!meal || mealEditInFlight) return;
+    if (!meal || mealWriteInFlight) return;
     if (state.week.picks.mains.includes(meal.id) || state.week.picks.breakfasts.includes(meal.id)) {
       state.errorMsg = "It's on this week's menu — unpick it first, then archive.";
       render();
       return;
     }
     if (!confirm(`Archive ${meal.name}? It leaves the picking grid but keeps its place in past weeks.`)) return;
-    mealEditInFlight = true;
+    mealWriteInFlight = true;
     try {
       el.disabled = true; // dead for the duration; the render below rebuilds the sheet either way
       const row = await withCeiling(db.updateMeal(meal.id, { archived: true }));
@@ -1610,9 +1636,10 @@ const actions = {
       state.editName = '';
       state.errorMsg = '';
     } catch (err) {
+      if (lockOnUnknownWrite(err)) return;
       state.errorMsg = `Couldn't archive: ${err.message ?? 'no connection'}`;
     } finally {
-      mealEditInFlight = false;
+      mealWriteInFlight = false;
     }
     render();
   },
@@ -1621,19 +1648,20 @@ const actions = {
   // and an ungated restore would race a concurrent Save on the same meal
   'restore-meal': async (el) => {
     const meal = mealById(el.dataset.id);
-    if (!meal || mealEditInFlight) return;
-    mealEditInFlight = true;
+    if (!meal || mealWriteInFlight) return;
+    mealWriteInFlight = true;
     try {
       el.disabled = true; // dead while the request flies
       const row = await withCeiling(db.updateMeal(meal.id, { archived: false }));
       Object.assign(meal, row);
       state.errorMsg = ''; // a stale save failure must not outlive the restore that followed it
     } catch (err) {
+      if (lockOnUnknownWrite(err)) return;
       el.disabled = false;
       alert(`Couldn't restore: ${err.message ?? 'no connection'}`); // visible from grid list and sheet alike
       return;
     } finally {
-      mealEditInFlight = false;
+      mealWriteInFlight = false;
     }
     render();
   },
@@ -1682,7 +1710,7 @@ let pressConsumed = false; // the hold fired — the trailing click is the same 
 
 function openEditSheet(id) {
   const meal = mealById(id);
-  if (!meal || mealEditInFlight) return; // no opening the editor over an airborne meal request
+  if (!meal || mealWriteInFlight) return; // no opening the editor over an airborne meal request
   state.editId = id;
   state.editName = meal.name;
   state.addOpen = false;
@@ -1812,22 +1840,21 @@ document.addEventListener('submit', async (e) => {
 
   if (form.id === 'form-addmeal') {
     const name = form.name.value.trim();
-    if (!name) return;
-    const kind = KIND_FOR_TAB[state.pickTab];
-    const tint = TINTS[state.meals.length % TINTS.length];
-    const file = form.image.files[0];
-    form.querySelector('button[type="submit"]').disabled = true; // an upload takes a beat — no double adds
+    if (!name || mealWriteInFlight) return;
+    mealWriteInFlight = true;
     let image_url = null;
     try {
-      image_url = file ? await db.uploadMealImage(await resizeImage(file)) : null;
-      const meal = await db.addMeal(state.session.user.id, { name, kind, image_url, tint });
+      form.querySelector('button[type="submit"]').disabled = true; // an upload takes a beat — no double adds
+      const kind = KIND_FOR_TAB[state.pickTab];
+      const tint = TINTS[state.meals.length % TINTS.length];
+      const file = form.image.files[0];
+      image_url = file ? await withCeiling(uploadPhoto(file)) : null;
+      const meal = await withCeiling(db.addMeal(state.session.user.id, { name, kind, image_url, tint }));
       state.meals.push(meal);
       state.addOpen = false;
       state.addName = '';
       state.errorMsg = '';
     } catch (err) {
-      state.addName = name; // the file input can't be refilled, but the name can
-      state.errorMsg = `Couldn't save: ${err.message ?? 'no connection'}`;
       // reclaim only on a server rejection (insert provably never landed);
       // a network unknown keeps the object — a live row may point at it
       if (image_url && isServerRejection(err)) {
@@ -1835,6 +1862,11 @@ document.addEventListener('submit', async (e) => {
       } else if (image_url) {
         console.info('meal image kept, insert outcome unknown:', image_url);
       }
+      if (lockOnUnknownWrite(err)) return;
+      state.addName = name; // the file input can't be refilled, but the name can
+      state.errorMsg = `Couldn't save: ${err.message ?? 'no connection'}`;
+    } finally {
+      mealWriteInFlight = false;
     }
     render();
   }
@@ -1842,13 +1874,13 @@ document.addEventListener('submit', async (e) => {
   if (form.id === 'form-editmeal') {
     const meal = mealById(state.editId);
     const name = form.name.value.trim();
-    if (!meal || !name || mealEditInFlight) return;
-    mealEditInFlight = true;
+    if (!meal || !name || mealWriteInFlight) return;
+    mealWriteInFlight = true;
     let uploaded = null;
     try {
       form.querySelector('button[type="submit"]').disabled = true; // an upload takes a beat — no double saves
       const file = form.image.files[0];
-      uploaded = file ? await withCeiling(db.uploadMealImage(await resizeImage(file))) : null;
+      uploaded = file ? await withCeiling(uploadPhoto(file)) : null;
       const fields = uploaded ? { name, image_url: uploaded } : { name };
       const row = await withCeiling(db.updateMeal(meal.id, fields));
       if (uploaded) delete meal.imageDead; // a fresh URL deserves a fresh chance
@@ -1857,8 +1889,6 @@ document.addEventListener('submit', async (e) => {
       state.editName = '';
       state.errorMsg = '';
     } catch (err) {
-      state.editName = name;
-      state.errorMsg = `Couldn't save: ${err.message ?? 'no connection'}`;
       // reclaim only the fresh upload, and only on a server rejection; the
       // replaced URL is never touched — seed meals share storage objects
       if (uploaded && isServerRejection(err)) {
@@ -1866,8 +1896,11 @@ document.addEventListener('submit', async (e) => {
       } else if (uploaded) {
         console.info('meal image kept, update outcome unknown:', uploaded);
       }
+      if (lockOnUnknownWrite(err)) return;
+      state.editName = name;
+      state.errorMsg = `Couldn't save: ${err.message ?? 'no connection'}`;
     } finally {
-      mealEditInFlight = false;
+      mealWriteInFlight = false;
     }
     render();
   }
@@ -1895,7 +1928,7 @@ window.addEventListener('hashchange', () => {
   state.addOpen = false;
   // an airborne edit keeps its sheet: dismissing here would bypass the
   // single-flight guard and strand the failure message unseen
-  if (!mealEditInFlight) {
+  if (!mealWriteInFlight) {
     state.editId = null;
     state.editName = '';
   }

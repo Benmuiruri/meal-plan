@@ -535,9 +535,9 @@ test('the add-meal submit glue nests the calls: upload takes the resized file, f
   const live = html.slice(hStart, hEnd)
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/\/\/[^\n]*/g, '');
-  // nesting pins the order — upload receives resizeImage's awaited result,
-  // so the calls cannot be reordered or the inner await dropped
-  assert.match(live, /await db\.uploadMealImage\(await resizeImage\(file\)\)/);
+  // uploadPhoto pins the order (upload receives resizeImage's awaited result)
+  // and puts the decode inside the promise the ceiling bounds
+  assert.match(live, /await withCeiling\(uploadPhoto\(file\)\)/);
   assert.match(live, /db\.addMeal\(/);
   assert.match(live, /state\.addName = name/, 'a failed add must keep the typed name');
   // reclaim is gated on a structured rejection: a network unknown may mean
@@ -1043,20 +1043,53 @@ test('the history detail is read-only and totals the week it shows', () => {
 
 // ── the request ceiling ────────────────────────────────────────────────
 
-test('withCeiling rejects a request that never lands, and tells the user to reload', async () => {
+test('withCeiling rejects a request that never lands', async () => {
   const never = new Promise(() => {});
-  await assert.rejects(withCeiling(never, 20), /reload to see whether it saved/);
+  await assert.rejects(withCeiling(never, 20), /took too long to answer/);
 });
 
-test('withCeiling passes a landed result straight through and stops its timer', async () => {
+test('withCeiling passes a landed result straight through', async () => {
   assert.equal(await withCeiling(Promise.resolve('landed'), 20), 'landed');
   await assert.rejects(withCeiling(Promise.reject(new Error('refused')), 20), /refused/);
-  // an un-cleared ceiling timer would keep the event loop alive past the suite
-  await sleep(40);
+});
+
+test('a request that lands cancels its ceiling timer instead of leaking it', async () => {
+  const cleared = [];
+  const realClear = globalThis.clearTimeout;
+  globalThis.clearTimeout = (t) => { cleared.push(t); return realClear(t); };
+  try {
+    await withCeiling(Promise.resolve('landed'), 60_000);
+  } finally {
+    globalThis.clearTimeout = realClear;
+  }
+  assert.equal(cleared.length, 1, 'the pending ceiling is cleared, not abandoned to fire in a minute');
+});
+
+// a timed-out write is abandoned, not cancelled — the flag is what stops the
+// caller from freeing the sheet for a second, racing write
+test('a ceiling breach is flagged as an unknown outcome, an ordinary failure is not', async () => {
+  const breach = await withCeiling(new Promise(() => {}), 20).catch((e) => e);
+  assert.equal(breach.timedOut, true);
+  const refusal = await withCeiling(Promise.reject(new Error('refused')), 20).catch((e) => e);
+  assert.notEqual(refusal.timedOut, true);
 });
 
 test('the shipped ceiling is bounded and generous enough for a photo upload', () => {
   assert.ok(MEAL_REQUEST_CEILING_MS >= 5000 && MEAL_REQUEST_CEILING_MS <= 30000, 'a usable, finite ceiling');
+});
+
+test('uploadPhoto starts the resize inside the promise, so a ceiling can bound the decode', async () => {
+  // the ceiling wraps uploadPhoto(file); if resize ran before the promise
+  // existed, the slowest step on a phone would sit outside every bound
+  const src = html.slice(html.indexOf('const uploadPhoto'), html.indexOf('// Supabase node clock skew'));
+  assert.match(src, /const uploadPhoto = async \(file\) => db\.uploadMealImage\(await resizeImage\(file\)\)/);
+  for (const site of ['form-addmeal', 'form-editmeal']) {
+    const start = html.indexOf(`if (form.id === '${site}')`);
+    const slice = html.slice(start, start + 1400);
+    assert.match(slice, /await withCeiling\(uploadPhoto\(file\)\)/, `${site} bounds resize and upload together`);
+    assert.doesNotMatch(slice, /withCeiling\(db\.uploadMealImage\(await resizeImage/,
+      `${site} must not resolve the resize before the ceiling starts`);
+  }
 });
 
 // ── meal editing & archiving ───────────────────────────────────────────
@@ -1159,6 +1192,39 @@ test('viewPick moves archived meals to a restore list — unless they are still 
   assert.match(out, /Hold a meal/, 'long-press is invisible — the hint is the only signpost');
 });
 
+test('Escape closes a sheet, editor first, and defers to the write gate', () => {
+  const s = html.indexOf("document.addEventListener('keydown'");
+  assert.ok(s > 0, 'keydown wiring found in index.html');
+  const live = html.slice(s, html.indexOf('});', s))
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/[^\n]*/g, '');
+  assert.match(live, /if \(e\.key !== 'Escape'\) return/);
+  // routed through the actions, so both close paths keep their in-flight guard
+  assert.match(live, /if \(state\.editId\) actions\['close-edit'\]\(\);\s*else if \(state\.addOpen\) actions\['close-add'\]\(\)/,
+    'the topmost sheet closes first, and neither bypasses its gate');
+});
+
+// every write path funnels an abandoned request into one honest outcome
+test('a timed-out write locks the app into a resync instead of freeing the sheet', () => {
+  const s = html.indexOf('function lockOnUnknownWrite');
+  assert.ok(s > 0, 'lockOnUnknownWrite found in index.html');
+  const live = html.slice(s, html.indexOf("\n}", s));
+  assert.match(live, /if \(!err\?\.timedOut\) return false/, 'only an unknown outcome locks');
+  assert.match(live, /state\.phase = 'error'/);
+  assert.match(live, /state\.editId = null[\s\S]*?state\.addOpen = false/, 'both sheets go');
+  assert.match(live, /Try again/, 'the error screen’s resync is the way out');
+
+  // the lock must precede the in-sheet message in every catch, or the sheet
+  // reopens with a retry that can race the abandoned write
+  for (const marker of ["'archive-meal':", "'restore-meal':", "if (form.id === 'form-addmeal')", "if (form.id === 'form-editmeal')"]) {
+    const at = html.indexOf(marker);
+    assert.ok(at > 0, `${marker} found in index.html`);
+    const body = html.slice(at, at + 1600);
+    assert.match(body, /catch \(err\) \{[\s\S]{0,700}?if \(lockOnUnknownWrite\(err\)\) return;/,
+      `${marker} routes an unknown outcome to the lock`);
+  }
+});
+
 test('the restore action re-arms its button on failure and flips archived back off', () => {
   const hStart = html.indexOf("'restore-meal':");
   const hEnd = html.indexOf("'delete-week':");
@@ -1213,7 +1279,7 @@ test('openEditSheet seeds the sheet from the meal, closes the add sheet, lands f
   const live = html.slice(s, e)
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/\/\/[^\n]*/g, '');
-  assert.match(live, /if \(!meal \|\| mealEditInFlight\) return/, 'no opening the editor over an airborne meal request');
+  assert.match(live, /if \(!meal \|\| mealWriteInFlight\) return/, 'no opening the editor over an airborne meal request');
   assert.match(live, /state\.editId = id/);
   assert.match(live, /state\.editName = meal\.name/);
   assert.match(live, /state\.addOpen = false/);
@@ -1259,7 +1325,7 @@ test('a route change dismisses both sheets — except an editor whose request is
   // unconditional dismissal here would bypass the single-flight guard and
   // strand the failure message in a sheet that no longer renders
   assert.match(live,
-    /state\.addOpen = false;\s*if \(!mealEditInFlight\) \{\s*state\.editId = null;\s*state\.editName = '';\s*\}/);
+    /state\.addOpen = false;\s*if \(!mealWriteInFlight\) \{\s*state\.editId = null;\s*state\.editName = '';\s*\}/);
 });
 
 // ── render(), executed ─────────────────────────────────────────────────
@@ -1295,7 +1361,24 @@ function renderToHtml() {
   return app.innerHTML;
 }
 
-test('render puts exactly one sheet on screen and makes the background inert', () => {
+// Split the output at the inert wrapper's OWN closing tag, found by counting
+// div depth — "somewhere in the string" cannot tell inside the wall from out.
+function splitAtWall(out) {
+  const open = '<div inert>';
+  assert.ok(out.startsWith(open), 'the wall opens the document');
+  let depth = 1;
+  const tag = /<div\b|<\/div>/g;
+  tag.lastIndex = open.length;
+  for (let m; (m = tag.exec(out)); ) {
+    depth += m[0] === '</div>' ? -1 : 1;
+    if (depth === 0) {
+      return { inside: out.slice(open.length, m.index), outside: out.slice(tag.lastIndex) };
+    }
+  }
+  assert.fail('the inert wrapper is never closed');
+}
+
+test('render walls the whole page behind inert and leaves exactly one sheet outside it', () => {
   const s = renderMod.rstate;
   s.editId = null; s.addOpen = false;
   const plain = renderToHtml();
@@ -1303,18 +1386,23 @@ test('render puts exactly one sheet on screen and makes the background inert', (
   assert.match(plain, /class="tabbar"/, 'the background is the page itself');
 
   s.addOpen = true;
-  const add = renderToHtml();
-  assert.match(add, /<div inert>[\s\S]*class="tabbar"[\s\S]*<\/div>/, 'the whole page goes behind the wall');
-  assert.match(add, /id="form-addmeal"/, 'state.addOpen alone puts the add sheet in the DOM');
-  assert.match(add.slice(add.indexOf('</div>')), /aria-modal="true"/, 'the sheet outside the wall declares modality');
+  const { inside, outside } = splitAtWall(renderToHtml());
+  // everything reachable must be one side or the other, and on the right side
+  assert.match(inside, /class="tabbar"/, 'the tab bar is behind the wall');
+  assert.match(inside, /class="header"/, 'so is the header');
+  assert.match(inside, /class="pick-grid"/, 'so is the grid');
+  assert.doesNotMatch(inside, /role="dialog"/, 'no sheet is trapped behind the wall');
+  assert.match(outside, /id="form-addmeal"/, 'state.addOpen alone puts the add sheet outside it');
+  assert.match(outside, /aria-modal="true"/, 'and the sheet that is reachable declares modality');
 
   // both flags set: the editor wins and only one dialog exists — the case a
   // per-action guard used to cover and the root ternary now makes structural
   s.editId = 'm1'; s.editName = 'Steak';
-  const both = renderToHtml();
-  assert.equal((both.match(/role="dialog"/g) ?? []).length, 1, 'never two stacked sheets');
-  assert.match(both, /id="form-editmeal"/);
-  assert.doesNotMatch(both, /id="form-addmeal"/, 'the editor wins');
+  const both = splitAtWall(renderToHtml());
+  assert.equal((both.outside.match(/role="dialog"/g) ?? []).length, 1, 'never two stacked sheets');
+  assert.doesNotMatch(both.inside, /role="dialog"/);
+  assert.match(both.outside, /id="form-editmeal"/);
+  assert.doesNotMatch(both.outside, /id="form-addmeal"/, 'the editor wins');
   s.editId = null; s.editName = ''; s.addOpen = false;
 });
 
@@ -1330,25 +1418,35 @@ test('render keeps the editor above every screen, not inside the pick grid', () 
 
 test('the edit sheet is single-flight: no dismiss, no double-fire while its request is airborne', () => {
   const ce = html.indexOf("'close-edit':");
-  assert.match(html.slice(ce, ce + 220), /if \(mealEditInFlight\) return/,
+  assert.match(html.slice(ce, ce + 220), /if \(mealWriteInFlight\) return/,
     'closing mid-flight would strand the failure message in a sheet that no longer renders');
   const am = html.indexOf("'archive-meal':");
-  assert.match(html.slice(am, am + 220), /if \(!meal \|\| mealEditInFlight\) return/);
+  assert.match(html.slice(am, am + 220), /if \(!meal \|\| mealWriteInFlight\) return/);
   // the arm sits flush against its try — a statement between them that threw
   // would wedge the gate closed for the rest of the session
-  assert.match(html.slice(am, html.indexOf("'restore-meal':")), /mealEditInFlight = true;\s*try \{/,
+  assert.match(html.slice(am, html.indexOf("'restore-meal':")), /mealWriteInFlight = true;\s*try \{/,
     'nothing runs between arming the gate and the try that releases it');
+  // the add sheet shares the gate: Escape or Cancel mid-add would otherwise
+  // strand its failure message in a sheet that no longer renders
+  const ca = html.indexOf("'close-add':");
+  assert.match(html.slice(ca, ca + 220), /if \(mealWriteInFlight\) return/);
+  const am2 = html.slice(html.indexOf("if (form.id === 'form-addmeal')"), html.indexOf("if (form.id === 'form-editmeal')"));
+  assert.match(am2, /if \(!name \|\| mealWriteInFlight\) return/);
+  assert.match(am2, /mealWriteInFlight = true;\s*let image_url = null;\s*try \{/);
+  assert.match(am2, /await withCeiling\(db\.addMeal\(/, 'the insert is bounded too');
+  assert.match(am2, /finally \{\s*mealWriteInFlight = false;\s*\}/);
+
   const em = html.slice(html.indexOf("if (form.id === 'form-editmeal')"), html.indexOf("if (form.id === 'form-additem')"));
-  assert.match(em, /if \(!meal \|\| !name \|\| mealEditInFlight\) return/);
-  assert.match(em, /mealEditInFlight = true;\s*let uploaded = null;\s*try \{/,
+  assert.match(em, /if \(!meal \|\| !name \|\| mealWriteInFlight\) return/);
+  assert.match(em, /mealWriteInFlight = true;\s*let uploaded = null;\s*try \{/,
     'only the throw-proof declaration sits between the arm and its try');
-  assert.match(em, /finally \{\s*mealEditInFlight = false;\s*\}/, 'the gate releases on every path');
+  assert.match(em, /finally \{\s*mealWriteInFlight = false;\s*\}/, 'the gate releases on every path');
   // the sheet's Restore button routes here too — ungated, it would race a
   // concurrent Save on the same meal and clobber the rename locally
   const rm = html.slice(html.indexOf("'restore-meal':"), html.indexOf("'delete-week':"));
-  assert.match(rm, /if \(!meal \|\| mealEditInFlight\) return/, 'restore is part of the same single flight');
-  assert.match(rm, /mealEditInFlight = true;\s*try \{/);
-  assert.match(rm, /finally \{\s*mealEditInFlight = false;\s*\}/);
+  assert.match(rm, /if \(!meal \|\| mealWriteInFlight\) return/, 'restore is part of the same single flight');
+  assert.match(rm, /mealWriteInFlight = true;\s*try \{/);
+  assert.match(rm, /finally \{\s*mealWriteInFlight = false;\s*\}/);
 });
 
 test('the archive action refuses a meal on this week’s menu, confirms, then flips archived', () => {
@@ -1374,7 +1472,7 @@ test('the edit submit glue uploads then updates, keeps failures in the sheet, ne
     .replace(/\/\/[^\n]*/g, '');
   // every gated request carries a ceiling: the inert background makes this
   // gate app-wide, so a hung request must not become a frozen app
-  assert.match(live, /await withCeiling\(db\.uploadMealImage\(await resizeImage\(file\)\)\)/);
+  assert.match(live, /await withCeiling\(uploadPhoto\(file\)\)/);
   assert.match(live, /await withCeiling\(db\.updateMeal\(meal\.id, fields\)\)/);
   assert.match(live, /if \(uploaded\) delete meal\.imageDead/, 'a fresh URL deserves a fresh chance');
   assert.match(live, /Object\.assign\(meal, row\)/, 'the state object keeps its identity — picks point at it');
