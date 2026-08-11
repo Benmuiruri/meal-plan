@@ -248,6 +248,11 @@ h2.screen-title {
 }
 .btn-restore { border-color: var(--leaf); color: var(--leaf); }
 .btn-archive:disabled, .btn-restore:disabled { opacity: 0.55; }
+/* the confirm rides above whichever sheet asked it — z-index, not DOM order,
+   decides the stack here, so its backdrop must outrank the sheets' 41 */
+.sheet-backdrop.is-top { z-index: 42; }
+.sheet.is-top { z-index: 43; }
+.confirm-body { font-size: 14px; line-height: 1.45; margin-bottom: 16px; }
 
 /* ================================================================
    6. WEEK — the painted board
@@ -881,7 +886,28 @@ const state = {
   historyDetail: null, // week_start of the open read-only week, from the hash
   saveStatus: 'saved',       // saved | saving | error
   saveErrorPermanent: false, // error subtype: permanent failures get Reload, not Retry
+  confirm: null,             // the open question: { title, body, confirmLabel, resolve }
 };
+
+// The native confirm dialog's replacement. Resolves true only from the
+// Confirm button; Cancel, the backdrop, Escape, a back gesture and the
+// unknown-write lock all settle false — an unanswered question would
+// strand the flow awaiting it.
+function confirmSheet({ title, body, confirmLabel }) {
+  return new Promise((resolve) => {
+    state.confirm = { title, body, confirmLabel, resolve };
+    render();
+    $('.sheet [data-action="confirm-no"]')?.focus(); // land on the safe answer
+  });
+}
+
+function settleConfirm(answer) {
+  const open = state.confirm;
+  if (!open) return; // already answered — a late teardown must not re-resolve
+  state.confirm = null; // cleared before resolve, so the resuming flow renders no stale sheet
+  open.resolve(answer);
+  render();
+}
 
 // Volatile flag: a failed card photo degrades to the tinted tile. Cleared
 // ONLY by an online transition or a meals reload — a failure while the
@@ -1200,6 +1226,20 @@ function viewEditSheet() {
     </div>`;
 }
 
+function viewConfirmSheet() {
+  const c = state.confirm;
+  return `
+    <div class="sheet-backdrop is-top" data-action="confirm-no"></div>
+    <div class="sheet is-top" role="dialog" aria-modal="true" aria-label="${esc(c.title)}">
+      <h3>${esc(c.title)}</h3>
+      <p class="confirm-body">${esc(c.body)}</p>
+      <div class="row-btns">
+        <button type="button" class="btn-quiet" data-action="confirm-no">Cancel</button>
+        <button type="button" class="btn-primary" data-action="confirm-yes">${esc(c.confirmLabel)}</button>
+      </div>
+    </div>`;
+}
+
 /* ---------- Week ---------- */
 
 function viewWeek() {
@@ -1458,6 +1498,12 @@ function render() {
   // mid-request cannot visually dismiss it.
   const sheet = state.editId ? viewEditSheet()
     : state.addOpen ? viewAddSheet(KIND_FOR_TAB[state.pickTab]) : '';
+  // a confirm outranks both sheets and walls off even the one that asked it —
+  // the question is the only live surface until it is answered
+  if (state.confirm) {
+    app.innerHTML = `<div inert>${under}${sheet}</div>${viewConfirmSheet()}`;
+    return;
+  }
   app.innerHTML = sheet ? `<div inert>${under}</div>${sheet}` : under;
 }
 
@@ -1497,11 +1543,15 @@ function animateMoney(el, to) {
 // dismisses, double-fires, or opens the editor over an airborne write
 let mealWriteInFlight = false;
 
+// the week delete has the same one-at-a-time shape, on its own gate
+let weekDeleteInFlight = false;
+
 // A timed-out write is abandoned, not cancelled — it may still land. Freeing
 // the sheet would let a second write race it, so the app locks into a resync,
 // which is the only thing that can tell what the server actually holds.
 function lockOnUnknownWrite(err) {
   if (!err?.timedOut) return false;
+  settleConfirm(false); // the error screen replaces any open question — answer it, don't strand its flow
   state.editId = null;
   state.editName = '';
   state.addOpen = false;
@@ -1551,6 +1601,9 @@ const actions = {
     state.editId = null; state.editName = ''; state.errorMsg = ''; render();
   },
 
+  'confirm-yes': () => settleConfirm(true),
+  'confirm-no': () => settleConfirm(false),
+
   'lift': (el) => {
     const { day, slot } = el.dataset;
     const lift = state.lifted;
@@ -1578,16 +1631,21 @@ const actions = {
 
   'save-week': async () => {
     if (saveWeekBusy()) return; // no confirm dialog over a running flow
-    if (!confirm('Save this week and start the next?')) return;
+    if (!(await confirmSheet({
+      title: 'Save this week?',
+      body: 'It moves to History and the next week starts fresh.',
+      confirmLabel: 'Save week',
+    }))) return;
     // gate the UI: an edit typed mid-flow would arm a debounced save that
     // fires into the just-frozen record
     state.phase = 'loading';
     state.loadingMsg = 'Saving the week…';
     render();
     const { outcome, error } = await performSaveWeek(currentMonday());
-    // unreachable via this sole caller (the guard above runs with no await
-    // before the call) — kept first so no future second caller can clobber
-    // the running flow's gate or its caption
+    // unreachable via this sole caller (the confirm's wall blocks a second
+    // tap, and its answer resumes this flow in a microtask no click can beat)
+    // — kept first so no future second caller can clobber the running flow's
+    // gate or its caption
     if (outcome === 'busy') return;
     state.loadingMsg = '';
     if (outcome === 'save-unknown' || outcome === 'load-failed') {
@@ -1618,7 +1676,7 @@ const actions = {
     }
   },
 
-  'archive-meal': async (el) => {
+  'archive-meal': async () => {
     const meal = mealById(state.editId);
     if (!meal || mealWriteInFlight) return;
     if (state.week.picks.mains.includes(meal.id) || state.week.picks.breakfasts.includes(meal.id)) {
@@ -1626,10 +1684,15 @@ const actions = {
       render();
       return;
     }
-    if (!confirm(`Archive ${meal.name}? It leaves the picking grid but keeps its place in past weeks.`)) return;
+    if (!(await confirmSheet({
+      title: `Archive ${meal.name}?`,
+      body: 'It leaves the picking grid but keeps its place in past weeks.',
+      confirmLabel: 'Archive',
+    }))) return;
+    // no el.disabled here: the confirm's re-renders detached the tapped
+    // button — the gate above is what blocks a re-dispatch
     mealWriteInFlight = true;
     try {
-      el.disabled = true; // dead for the duration; the render below rebuilds the sheet either way
       const row = await withCeiling(db.updateMeal(meal.id, { archived: true }));
       Object.assign(meal, row);
       state.editId = null;
@@ -1668,16 +1731,23 @@ const actions = {
 
   'delete-week': async (el) => {
     const week = state.history?.find((w) => w.id === el.dataset.id);
-    if (!week) return;
-    if (!confirm(`Delete the week of ${fmtDate(week.week_start)}? There's no undo.`)) return;
-    el.disabled = true; // dead while the request flies
+    // a flag, not el.disabled — the confirm's re-renders detach the tapped
+    // button, so disabling it would mutate a dead node
+    if (!week || weekDeleteInFlight) return;
+    if (!(await confirmSheet({
+      title: `Delete the week of ${fmtDate(week.week_start)}?`,
+      body: "There's no undo.",
+      confirmLabel: 'Delete',
+    }))) return;
+    weekDeleteInFlight = true;
     try {
       await db.deleteWeek(week.id);
       state.history = state.history.filter((w) => w.id !== week.id);
       location.hash = '#/history'; // a different hash, so the change event repaints the list
     } catch (err) {
-      el.disabled = false;
       alert(`Couldn't delete: ${err.message ?? 'no connection'}`);
+    } finally {
+      weekDeleteInFlight = false;
     }
   },
 
@@ -1696,7 +1766,8 @@ document.addEventListener('click', (e) => {
 // Escape is the keyboard way out of a sheet — the in-flight guards still hold
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
-  if (state.editId) actions['close-edit']();
+  if (state.confirm) settleConfirm(false); // the question is topmost — Escape answers it, not the sheet under it
+  else if (state.editId) actions['close-edit']();
   else if (state.addOpen) actions['close-add']();
 });
 
@@ -1921,6 +1992,7 @@ document.addEventListener('submit', async (e) => {
 
 /* ---------- routing lives in 3. UTILITIES; this is only the wiring ---------- */
 window.addEventListener('hashchange', () => {
+  settleConfirm(false); // back answers the question — an open one would strand the flow awaiting it
   const { route, detail } = currentRoute();
   state.route = route;
   state.historyDetail = detail;

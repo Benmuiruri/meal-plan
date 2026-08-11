@@ -35,10 +35,12 @@ const src = html.slice(start, viewsBanner) + `
 function render() {}
 function viewSaveErrorBanner() { const k = state.saveErrorPermanent ? 'permanent' : 'transient'; return '<banner data-kind="' + k + '">' + k + '</banner>'; }
 export { state, db, scheduleSave, flushSave, signIn, resizeImage, isServerRejection,
-         markDeadImage, reviveDeadImages, performSaveWeek, withCeiling, MEAL_REQUEST_CEILING_MS };`;
+         markDeadImage, reviveDeadImages, performSaveWeek, withCeiling, MEAL_REQUEST_CEILING_MS,
+         confirmSheet, settleConfirm };`;
 
 const { state, db, scheduleSave, flushSave, signIn, resizeImage, isServerRejection,
-        markDeadImage, reviveDeadImages, performSaveWeek, withCeiling, MEAL_REQUEST_CEILING_MS } =
+        markDeadImage, reviveDeadImages, performSaveWeek, withCeiling, MEAL_REQUEST_CEILING_MS,
+        confirmSheet, settleConfirm } =
   await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(src));
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -1199,9 +1201,38 @@ test('Escape closes a sheet, editor first, and defers to the write gate', () => 
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/\/\/[^\n]*/g, '');
   assert.match(live, /if \(e\.key !== 'Escape'\) return/);
+  // the question is topmost — Escape answers it, never the sheet under it
+  assert.match(live, /if \(state\.confirm\) settleConfirm\(false\);\s*else if \(state\.editId\)/,
+    'an open confirm swallows Escape before either sheet sees it');
   // routed through the actions, so both close paths keep their in-flight guard
   assert.match(live, /if \(state\.editId\) actions\['close-edit'\]\(\);\s*else if \(state\.addOpen\) actions\['close-add'\]\(\)/,
     'the topmost sheet closes first, and neither bypasses its gate');
+});
+
+test('confirmSheet parks one question and settleConfirm answers it exactly once', async () => {
+  const p = confirmSheet({ title: 'Sure?', body: 'Really.', confirmLabel: 'Yes' });
+  assert.ok(state.confirm, 'the question sits in state for render to pick up');
+  settleConfirm(true);
+  assert.equal(await p, true);
+  assert.equal(state.confirm, null, 'settling clears the question');
+  settleConfirm(false); // nothing open — a stray teardown answer must be a no-op
+
+  const q = confirmSheet({ title: 'Again?', body: 'Still.', confirmLabel: 'Yes' });
+  settleConfirm(false);
+  settleConfirm(true); // a late second answer lands on nothing
+  assert.equal(await q, false);
+});
+
+test('a back gesture answers an open question before any sheet teardown', () => {
+  const s = html.indexOf("window.addEventListener('hashchange'");
+  assert.ok(s > 0, 'hashchange wiring found in index.html');
+  const live = html.slice(s, html.indexOf('});', s));
+  assert.match(live, /settleConfirm\(false\);[\s\S]*?state\.addOpen = false/,
+    'an unanswered question would strand the flow awaiting it');
+});
+
+test('the native dialogs are gone from every confirm path', () => {
+  assert.doesNotMatch(html, /[^.\w]confirm\(/, 'window.confirm has no callers left');
 });
 
 // every write path funnels an abandoned request into one honest outcome
@@ -1210,6 +1241,7 @@ test('a timed-out write locks the app into a resync instead of freeing the sheet
   assert.ok(s > 0, 'lockOnUnknownWrite found in index.html');
   const live = html.slice(s, html.indexOf("\n}", s));
   assert.match(live, /if \(!err\?\.timedOut\) return false/, 'only an unknown outcome locks');
+  assert.match(live, /settleConfirm\(false\)/, 'the lock answers an open question instead of repainting over it');
   assert.match(live, /state\.phase = 'error'/);
   assert.match(live, /state\.editId = null[\s\S]*?state\.addOpen = false/, 'both sheets go');
   assert.match(live, /Try again/, 'the error screen’s resync is the way out');
@@ -1406,6 +1438,19 @@ test('render walls the whole page behind inert and leaves exactly one sheet outs
   s.editId = null; s.editName = ''; s.addOpen = false;
 });
 
+test('a confirm outranks the sheets: even the sheet that asked goes behind the wall', () => {
+  const s = renderMod.rstate;
+  s.editId = 'm1'; s.editName = 'Steak';
+  s.confirm = { title: 'Archive Steak?', body: 'It keeps its place in past weeks.', confirmLabel: 'Archive' };
+  const { inside, outside } = splitAtWall(renderToHtml());
+  assert.match(inside, /id="form-editmeal"/, 'the asking sheet is walled off with the page');
+  assert.equal((outside.match(/role="dialog"/g) ?? []).length, 1, 'the question is the only live surface');
+  assert.match(outside, /aria-modal="true"/);
+  assert.match(outside, /data-action="confirm-yes"/, 'true has exactly one source');
+  assert.match(outside, /data-action="confirm-no"/, 'and Cancel is offered');
+  s.confirm = null; s.editId = null; s.editName = '';
+});
+
 test('render keeps the editor above every screen, not inside the pick grid', () => {
   const s = renderMod.rstate;
   s.editId = 'm1'; s.editName = 'Steak';
@@ -1458,7 +1503,7 @@ test('the archive action refuses a meal on this week’s menu, confirms, then fl
     .replace(/\/\/[^\n]*/g, '');
   assert.match(live, /picks\.mains\.includes\(meal\.id\) \|\|[\s\S]{0,60}?picks\.breakfasts\.includes\(meal\.id\)/,
     'both pick lists guard the current draft');
-  assert.match(live, /unpick it first[\s\S]{0,220}?if \(!confirm\(/, 'guard first, question second');
+  assert.match(live, /unpick it first[\s\S]{0,260}?if \(!\(await confirmSheet\(/, 'guard first, question second');
   assert.match(live, /withCeiling\(db\.updateMeal\(meal\.id, \{ archived: true \}\)\)/);
   assert.match(live, /catch[\s\S]{0,160}?errorMsg/, 'a failed archive stays in the sheet with its reason');
 });
@@ -1533,16 +1578,18 @@ test('the delete-week action confirms, deletes, drops the row from cache and ret
   const live = html.slice(hStart, hEnd)
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/\/\/[^\n]*/g, '');
-  assert.match(live, /if \(!confirm\([\s\S]{0,120}?\)\) return/, 'no silent destruction');
-  assert.match(live, /confirm\([\s\S]{0,60}?fmtDate\(week\.week_start\)/,
+  assert.match(live, /if \(!week \|\| weekDeleteInFlight\) return/,
+    'the button cannot gate this — the confirm re-render detaches it, so a flag must');
+  assert.match(live, /if \(!\(await confirmSheet\(/, 'no silent destruction');
+  assert.match(live, /confirmSheet\(\{[\s\S]{0,120}?fmtDate\(week\.week_start\)/,
     'the destruction prompt names its target the way the app writes dates everywhere else');
   // one anchor for the whole order: the cache drop and the navigation sit
   // AFTER the await — moved above it, a failed delete would erase the row
   // from the UI while the server kept it
   assert.match(live,
-    /el\.disabled = true;[\s\S]{0,80}?await db\.deleteWeek\(week\.id\);\s*state\.history = state\.history\.filter[\s\S]{0,80}?location\.hash = '#\/history'/,
-    'disable → delete → drop from cache → navigate, in that order');
-  assert.match(live, /catch[\s\S]{0,120}?el\.disabled = false/, 'a failed delete re-arms the button');
+    /weekDeleteInFlight = true;\s*try \{\s*await db\.deleteWeek\(week\.id\);\s*state\.history = state\.history\.filter[\s\S]{0,80}?location\.hash = '#\/history'/,
+    'arm → delete → drop from cache → navigate, in that order');
+  assert.match(live, /finally \{\s*weekDeleteInFlight = false;\s*\}/, 'the gate releases on every path');
   assert.match(live, /alert\(/, 'a failed delete says so');
 });
 
