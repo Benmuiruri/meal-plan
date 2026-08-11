@@ -185,7 +185,6 @@ h2.screen-title {
 }
 .pick-count .label { font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink-dim); }
 .pick-count .count { font-family: var(--mono); font-size: 20px; font-weight: 500; }
-.pick-count.bump .count { color: var(--tomato); }
 
 .pick-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .meal-card {
@@ -868,6 +867,7 @@ async function signIn(email, password) {
 const state = {
   phase: 'loading',   // loading | config | signin | ready | error
   loadingMsg: '',     // the loading gate's words when it isn't a cold boot
+  errorTitle: '',     // every error site names its own heading — one hard-coded "Can't load" contradicted half the bodies
   errorMsg: '',
   signinEmail: '',    // survives a failed attempt so only the password is retyped
   session: null,
@@ -908,6 +908,17 @@ function settleConfirm(answer) {
   state.confirm = null; // cleared before resolve, so the resuming flow renders no stale sheet
   open.resolve(answer);
   render();
+}
+
+// The confirm's one-button sibling: nothing to decide, so Okay, the backdrop,
+// Escape and back all just dismiss it — the answer is never read.
+function noticeSheet({ title, body }) {
+  return new Promise((resolve) => {
+    settleConfirm(false); // same slot, same rule: one question at a time
+    state.confirm = { title, body, confirmLabel: 'Okay', notice: true, resolve };
+    render();
+    $('.sheet [data-action="confirm-yes"]')?.focus(); // the only answer there is
+  });
 }
 
 // Volatile flag: a failed card photo degrades to the tinted tile. Cleared
@@ -1127,7 +1138,7 @@ function viewSignin() {
 
 function viewError() {
   return viewGate(`
-    <h2>Can't load</h2>
+    <h2>${esc(state.errorTitle)}</h2>
     <p>${esc(state.errorMsg)}</p>
     <button class="btn-primary" data-action="retry-sync" type="button">Try again</button>`);
 }
@@ -1235,7 +1246,7 @@ function viewConfirmSheet() {
       <h3>${esc(c.title)}</h3>
       <p class="confirm-body">${esc(c.body)}</p>
       <div class="row-btns">
-        <button type="button" class="btn-quiet" data-action="confirm-no">Cancel</button>
+        ${c.notice ? '' : '<button type="button" class="btn-quiet" data-action="confirm-no">Cancel</button>'}
         <button type="button" class="btn-primary" data-action="confirm-yes">${esc(c.confirmLabel)}</button>
       </div>
     </div>`;
@@ -1558,6 +1569,7 @@ function lockOnUnknownWrite(err) {
   state.addOpen = false;
   state.addName = '';
   state.phase = 'error';
+  state.errorTitle = "Can't confirm";
   state.errorMsg = "Couldn't tell whether that change landed — it took too long to answer. Tap Try again to read the truth from Supabase.";
   render();
   return true;
@@ -1576,9 +1588,10 @@ const actions = {
     if (at >= 0) list.splice(at, 1);
     else if (list.length < PICK_TARGET) list.push(id);
     else {
-      const count = $('#pick-count');
-      count.classList.add('bump');
-      setTimeout(() => count.classList.remove('bump'), 600);
+      noticeSheet({
+        title: `${PICK_TARGET} already selected`,
+        body: 'Unpick one first to make room for this one.',
+      });
       return;
     }
     state.week.days = reconcileDays(state.week.picks, state.week.days);
@@ -1652,6 +1665,7 @@ const actions = {
     if (outcome === 'save-unknown' || outcome === 'load-failed') {
       // editing must stop — Try again resyncs onto the truth either way
       state.phase = 'error';
+      state.errorTitle = outcome === 'save-unknown' ? "Can't confirm" : "Can't load";
       state.errorMsg = outcome === 'save-unknown'
         ? "Couldn't confirm whether the week was saved. Tap Try again — the resync sorts it out either way."
         : 'The week was saved, but starting the next one failed. Tap Try again.';
@@ -2052,6 +2066,7 @@ async function initData() {
     if (route === 'history') loadHistory();
   } catch (err) {
     state.phase = 'error';
+    state.errorTitle = "Can't load";
     state.errorMsg = err?.message
       ? `Something went wrong talking to Supabase: ${err.message}`
       : 'Could not reach Supabase — check your connection and try again.';
@@ -2127,6 +2142,7 @@ async function main() {
       ({ createClient } = await import(SUPABASE_CDN));
     } catch {
       state.phase = 'error';
+      state.errorTitle = "Can't load";
       state.errorMsg = 'Could not load the app libraries — check your connection and try again.';
       render();
       return;
@@ -2138,6 +2154,7 @@ async function main() {
     } catch (err) {
       // a rejection out of boot() would otherwise park the app on the splash
       state.phase = 'error';
+      state.errorTitle = "Can't start";
       state.errorMsg = err?.message
         ? `Could not start: ${err.message}`
         : 'Could not start — check your connection and try again.';

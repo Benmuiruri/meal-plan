@@ -36,11 +36,11 @@ function render() {}
 function viewSaveErrorBanner() { const k = state.saveErrorPermanent ? 'permanent' : 'transient'; return '<banner data-kind="' + k + '">' + k + '</banner>'; }
 export { state, db, scheduleSave, flushSave, signIn, resizeImage, isServerRejection,
          markDeadImage, reviveDeadImages, performSaveWeek, withCeiling, MEAL_REQUEST_CEILING_MS,
-         confirmSheet, settleConfirm };`;
+         confirmSheet, settleConfirm, noticeSheet };`;
 
 const { state, db, scheduleSave, flushSave, signIn, resizeImage, isServerRejection,
         markDeadImage, reviveDeadImages, performSaveWeek, withCeiling, MEAL_REQUEST_CEILING_MS,
-        confirmSheet, settleConfirm } =
+        confirmSheet, settleConfirm, noticeSheet } =
   await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(src));
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -1231,6 +1231,31 @@ test('confirmSheet parks one question and settleConfirm answers it exactly once'
   assert.equal(await second, true);
 });
 
+test('a notice is a one-answer question on the same slot: any way out resolves it', async () => {
+  const n = noticeSheet({ title: '7 already selected', body: 'Unpick one first.' });
+  assert.equal(state.confirm.notice, true, 'the notice flag drops the Cancel button');
+  assert.equal(state.confirm.confirmLabel, 'Okay');
+  settleConfirm(false); // backdrop, Escape, back — the answer is never read
+  await n;
+  assert.equal(state.confirm, null);
+});
+
+test('an 8th pick asks nothing and saves nothing — it gets a notice and stops', () => {
+  const tp = html.slice(html.indexOf("'toggle-pick':"), html.indexOf("'open-add':"));
+  assert.match(tp, /noticeSheet\(\{[\s\S]{0,140}?PICK_TARGET[\s\S]{0,140}?\}\);\s*return;/,
+    'the full-board branch shows the notice and exits before any reconcile or save');
+  assert.doesNotMatch(tp, /bump/, 'the counter bump is gone — the notice replaced it');
+});
+
+test('every error-phase site names its own heading', () => {
+  const sites = [...html.matchAll(/state\.phase = 'error';/g)];
+  assert.ok(sites.length >= 5, 'the error sites were found');
+  for (const m of sites) {
+    assert.match(html.slice(m.index, m.index + 260), /state\.errorTitle = /,
+      `the error site at index ${m.index} sets a heading to match its body`);
+  }
+});
+
 test('a back gesture answers an open question before any sheet teardown', () => {
   const s = html.indexOf("window.addEventListener('hashchange'");
   assert.ok(s > 0, 'hashchange wiring found in index.html');
@@ -1250,18 +1275,25 @@ test('a timed-out write locks the app into a resync instead of freeing the sheet
   const live = html.slice(s, html.indexOf("\n}", s));
   assert.match(live, /if \(!err\?\.timedOut\) return false/, 'only an unknown outcome locks');
   assert.match(live, /settleConfirm\(false\)/, 'the lock answers an open question instead of repainting over it');
+  assert.match(live, /state\.errorTitle = /, 'the lock names its own heading — "Can\'t load" would contradict the body');
   assert.match(live, /state\.phase = 'error'/);
   assert.match(live, /state\.editId = null[\s\S]*?state\.addOpen = false/, 'both sheets go');
   assert.match(live, /Try again/, 'the error screen’s resync is the way out');
 
   // the lock must precede the in-sheet message in every catch, or the sheet
-  // reopens with a retry that can race the abandoned write
+  // reopens with a retry that can race the abandoned write — checked by
+  // position inside the catch, so swapping the lines fails, not by proximity
   for (const marker of ["'archive-meal':", "'restore-meal':", "'delete-week':", "if (form.id === 'form-addmeal')", "if (form.id === 'form-editmeal')"]) {
     const at = html.indexOf(marker);
     assert.ok(at > 0, `${marker} found in index.html`);
-    const body = html.slice(at, at + 1600);
-    assert.match(body, /catch \(err\) \{[\s\S]{0,700}?if \(lockOnUnknownWrite\(err\)\) return;/,
-      `${marker} routes an unknown outcome to the lock`);
+    const c = html.indexOf('catch (err) {', at);
+    assert.ok(c > at, `${marker} has a catch`);
+    const body = html.slice(c, html.indexOf('finally', c));
+    const lock = body.indexOf('if (lockOnUnknownWrite(err)) return;');
+    assert.ok(lock >= 0, `${marker} routes an unknown outcome to the lock`);
+    const surface = body.search(/state\.errorMsg =|state\.addName =|state\.editName =|alert\(|el\.disabled/);
+    assert.ok(surface > lock,
+      `${marker}: the lock precedes every user-visible write in its catch`);
   }
 });
 
@@ -1444,6 +1476,25 @@ test('render walls the whole page behind inert and leaves exactly one sheet outs
   assert.match(both.outside, /id="form-editmeal"/);
   assert.doesNotMatch(both.outside, /id="form-addmeal"/, 'the editor wins');
   s.editId = null; s.editName = ''; s.addOpen = false;
+});
+
+test('a notice renders one button — Okay, no Cancel — and its backdrop still dismisses', () => {
+  const s = renderMod.rstate;
+  s.confirm = { title: '7 already selected', body: 'Unpick one first.', confirmLabel: 'Okay', notice: true };
+  const { outside } = splitAtWall(renderToHtml());
+  assert.match(outside, /data-action="confirm-yes">Okay</, 'the one answer is Okay');
+  assert.doesNotMatch(outside, /btn-quiet/, 'no Cancel on a notice');
+  assert.match(outside, /sheet-backdrop is-top" data-action="confirm-no"/, 'tapping outside still dismisses');
+  s.confirm = null;
+});
+
+test('the error screen wears the heading its site chose, not a hard-coded one', () => {
+  const s = renderMod.rstate;
+  s.phase = 'error'; s.errorTitle = 'Not loading, something else'; s.errorMsg = 'the body';
+  const out = renderToHtml();
+  assert.match(out, /<h2>Not loading, something else<\/h2>/, 'the heading comes from state');
+  assert.doesNotMatch(out, /Can't load/, 'nothing hard-coded contradicts the body');
+  s.phase = 'ready'; s.errorTitle = ''; s.errorMsg = '';
 });
 
 test('a confirm outranks the sheets: even the sheet that asked goes behind the wall', () => {
