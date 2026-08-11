@@ -972,9 +972,10 @@ test('the save-week action gates the UI for the duration and maps every outcome'
   assert.match(live, /outcome === 'save-unknown'\s*\? "Couldn't confirm whether the week was saved/);
   assert.match(live, /: 'The week was saved, but starting the next one failed/);
   // dirty states the fact and nothing else — advice is the banner's job
-  assert.match(live, /outcome === 'dirty'\)[\s\S]{0,160}?alert\("The week wasn't saved/,
+  assert.match(live, /outcome === 'dirty'\)[\s\S]{0,160}?noticeSheet\([\s\S]{0,120}?The week wasn't saved/,
     'an explicitly invoked action must acknowledge its failure');
-  assert.match(live, /outcome === 'save-failed'\)[\s\S]{0,80}?error\?\.message/, 'the rejection reason reaches the user');
+  assert.match(live, /outcome === 'save-failed'\)[\s\S]{0,160}?noticeSheet\([\s\S]{0,120}?error\?\.message/,
+    'the rejection reason reaches the user');
   // done must not rely on a hashchange event that an equal hash never fires
   // — anchored to the done branch AND covering all four statements in order
   assert.match(live,
@@ -1266,6 +1267,7 @@ test('a back gesture answers an open question before any sheet teardown', () => 
 
 test('the native dialogs are gone from every confirm path', () => {
   assert.doesNotMatch(html, /[^\w]confirm\(/, 'window.confirm has no callers left, dot-qualified or bare');
+  assert.doesNotMatch(html, /[^\w]alert\(/, 'alert has no callers left either — the notice does its job');
 });
 
 // every write path funnels an abandoned request into one honest outcome
@@ -1288,10 +1290,12 @@ test('a timed-out write locks the app into a resync instead of freeing the sheet
     assert.ok(at > 0, `${marker} found in index.html`);
     const c = html.indexOf('catch (err) {', at);
     assert.ok(c > at, `${marker} has a catch`);
-    const body = html.slice(c, html.indexOf('finally', c));
+    const fin = html.indexOf('finally', c);
+    assert.ok(fin > c, `${marker}'s catch is bounded by its finally — the slice below depends on it`);
+    const body = html.slice(c, fin);
     const lock = body.indexOf('if (lockOnUnknownWrite(err)) return;');
     assert.ok(lock >= 0, `${marker} routes an unknown outcome to the lock`);
-    const surface = body.search(/state\.errorMsg =|state\.addName =|state\.editName =|alert\(|el\.disabled/);
+    const surface = body.search(/state\.errorMsg =|state\.addName =|state\.editName =|noticeSheet\(|el\.disabled/);
     assert.ok(surface > lock,
       `${marker}: the lock precedes every user-visible write in its catch`);
   }
@@ -1649,7 +1653,7 @@ test('the delete-week action confirms, deletes, drops the row from cache and ret
     /weekDeleteInFlight = true;\s*try \{\s*await withCeiling\(db\.deleteWeek\(week\.id\)\);\s*state\.history = state\.history\.filter[\s\S]{0,80}?location\.hash = '#\/history'/,
     'arm → bounded delete → drop from cache → navigate, in that order');
   assert.match(live, /finally \{\s*weekDeleteInFlight = false;\s*\}/, 'the gate releases on every path');
-  assert.match(live, /alert\(/, 'a failed delete says so');
+  assert.match(live, /noticeSheet\(/, 'a failed delete says so');
 });
 
 // ── installability: manifest, icons, keyboard focus ────────────────────

@@ -1158,7 +1158,7 @@ function viewPick() {
         <button type="button" data-action="pick-tab" data-tab="mains" class="${state.pickTab === 'mains' ? 'is-active' : ''}">Mains</button>
         <button type="button" data-action="pick-tab" data-tab="breakfasts" class="${state.pickTab === 'breakfasts' ? 'is-active' : ''}">Breakfasts</button>
       </div>
-      <div class="pick-count" id="pick-count">
+      <div class="pick-count">
         <span class="label">${state.pickTab === 'mains' ? 'Mains picked' : 'Breakfasts picked'}</span>
         <span class="count money">${picked.length} / ${PICK_TARGET}</span>
       </div>
@@ -1685,9 +1685,15 @@ const actions = {
     render();
     if (outcome === 'dirty') {
       // fact only, no advice — remediation lives with the chip and banner
-      alert("The week wasn't saved — your latest changes haven't reached Supabase yet.");
+      noticeSheet({
+        title: 'Not saved',
+        body: "The week wasn't saved — your latest changes haven't reached Supabase yet.",
+      });
     } else if (outcome === 'save-failed') {
-      alert(`Couldn't save the week: ${error?.message ?? 'refused'}. Nothing was changed — try again.`);
+      noticeSheet({
+        title: 'Save failed',
+        body: `Couldn't save the week: ${error?.message ?? 'refused'}. Nothing was changed — try again.`,
+      });
     }
   },
 
@@ -1736,7 +1742,11 @@ const actions = {
     } catch (err) {
       if (lockOnUnknownWrite(err)) return;
       el.disabled = false;
-      alert(`Couldn't restore: ${err.message ?? 'no connection'}`); // visible from grid list and sheet alike
+      // rides the confirm slot, so it reads the same from grid list and sheet alike
+      noticeSheet({
+        title: 'Restore failed',
+        body: `Couldn't restore: ${err.message ?? 'no connection'}`,
+      });
       return;
     } finally {
       mealWriteInFlight = false;
@@ -1763,7 +1773,10 @@ const actions = {
       location.hash = '#/history'; // a different hash, so the change event repaints the list
     } catch (err) {
       if (lockOnUnknownWrite(err)) return; // deleteWeek is idempotent — the resync's re-read is safe
-      alert(`Couldn't delete: ${err.message ?? 'no connection'}`);
+      noticeSheet({
+        title: 'Delete failed',
+        body: `Couldn't delete: ${err.message ?? 'no connection'}`,
+      });
     } finally {
       weekDeleteInFlight = false;
     }
