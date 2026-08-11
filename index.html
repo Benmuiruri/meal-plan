@@ -110,7 +110,9 @@ h2.screen-title {
   background: var(--chalk);
   border-top: 2px solid var(--ink);
   display: flex;
-  height: var(--tabbar-h);
+  /* min-, not fixed: the two-line label case sits within a hair of 58px, so
+     any font/icon drift must grow the bar rather than clip into the inset */
+  min-height: var(--tabbar-h);
   padding-bottom: env(safe-area-inset-bottom);
 }
 .tabbar a {
