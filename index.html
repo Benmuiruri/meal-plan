@@ -895,6 +895,7 @@ const state = {
 // strand the flow awaiting it.
 function confirmSheet({ title, body, confirmLabel }) {
   return new Promise((resolve) => {
+    settleConfirm(false); // one question at a time: a clobbered ask must resolve, not dangle
     state.confirm = { title, body, confirmLabel, resolve };
     render();
     $('.sheet [data-action="confirm-no"]')?.focus(); // land on the safe answer
@@ -1557,7 +1558,7 @@ function lockOnUnknownWrite(err) {
   state.addOpen = false;
   state.addName = '';
   state.phase = 'error';
-  state.errorMsg = "Couldn't tell whether that saved — it took too long to answer. Tap Try again to read the truth from Supabase.";
+  state.errorMsg = "Couldn't tell whether that change landed — it took too long to answer. Tap Try again to read the truth from Supabase.";
   render();
   return true;
 }
@@ -1741,10 +1742,13 @@ const actions = {
     }))) return;
     weekDeleteInFlight = true;
     try {
-      await db.deleteWeek(week.id);
+      // bounded like every other write: a hung delete must not hold the
+      // gate forever with nothing on screen saying why
+      await withCeiling(db.deleteWeek(week.id));
       state.history = state.history.filter((w) => w.id !== week.id);
       location.hash = '#/history'; // a different hash, so the change event repaints the list
     } catch (err) {
+      if (lockOnUnknownWrite(err)) return; // deleteWeek is idempotent — the resync's re-read is safe
       alert(`Couldn't delete: ${err.message ?? 'no connection'}`);
     } finally {
       weekDeleteInFlight = false;

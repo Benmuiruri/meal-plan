@@ -1221,6 +1221,14 @@ test('confirmSheet parks one question and settleConfirm answers it exactly once'
   settleConfirm(false);
   settleConfirm(true); // a late second answer lands on nothing
   assert.equal(await q, false);
+
+  // a second ask while one is open must answer the first, not strand it
+  const first = confirmSheet({ title: 'First?', body: 'One.', confirmLabel: 'Yes' });
+  const second = confirmSheet({ title: 'Second?', body: 'Two.', confirmLabel: 'Yes' });
+  assert.equal(await first, false, 'the clobbered question resolves instead of dangling');
+  assert.equal(state.confirm.title, 'Second?', 'the new question is the open one');
+  settleConfirm(true);
+  assert.equal(await second, true);
 });
 
 test('a back gesture answers an open question before any sheet teardown', () => {
@@ -1232,7 +1240,7 @@ test('a back gesture answers an open question before any sheet teardown', () => 
 });
 
 test('the native dialogs are gone from every confirm path', () => {
-  assert.doesNotMatch(html, /[^.\w]confirm\(/, 'window.confirm has no callers left');
+  assert.doesNotMatch(html, /[^\w]confirm\(/, 'window.confirm has no callers left, dot-qualified or bare');
 });
 
 // every write path funnels an abandoned request into one honest outcome
@@ -1248,7 +1256,7 @@ test('a timed-out write locks the app into a resync instead of freeing the sheet
 
   // the lock must precede the in-sheet message in every catch, or the sheet
   // reopens with a retry that can race the abandoned write
-  for (const marker of ["'archive-meal':", "'restore-meal':", "if (form.id === 'form-addmeal')", "if (form.id === 'form-editmeal')"]) {
+  for (const marker of ["'archive-meal':", "'restore-meal':", "'delete-week':", "if (form.id === 'form-addmeal')", "if (form.id === 'form-editmeal')"]) {
     const at = html.indexOf(marker);
     assert.ok(at > 0, `${marker} found in index.html`);
     const body = html.slice(at, at + 1600);
@@ -1587,8 +1595,8 @@ test('the delete-week action confirms, deletes, drops the row from cache and ret
   // AFTER the await — moved above it, a failed delete would erase the row
   // from the UI while the server kept it
   assert.match(live,
-    /weekDeleteInFlight = true;\s*try \{\s*await db\.deleteWeek\(week\.id\);\s*state\.history = state\.history\.filter[\s\S]{0,80}?location\.hash = '#\/history'/,
-    'arm → delete → drop from cache → navigate, in that order');
+    /weekDeleteInFlight = true;\s*try \{\s*await withCeiling\(db\.deleteWeek\(week\.id\)\);\s*state\.history = state\.history\.filter[\s\S]{0,80}?location\.hash = '#\/history'/,
+    'arm → bounded delete → drop from cache → navigate, in that order');
   assert.match(live, /finally \{\s*weekDeleteInFlight = false;\s*\}/, 'the gate releases on every path');
   assert.match(live, /alert\(/, 'a failed delete says so');
 });
