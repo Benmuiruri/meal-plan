@@ -449,7 +449,7 @@ input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; marg
 .sum-day .m-line.lunch { color: var(--chalk-dim); font-style: italic; }
 
 .shop-row { padding: 4px; }
-.shop-row .g-name { transition: opacity 0.15s; }
+.g-num { width: 26px; flex-shrink: 0; text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; color: var(--ink-dim); }
 .shop-row.is-checked .g-name { text-decoration: line-through; opacity: 0.45; }
 .shop-row.is-checked .money { opacity: 0.45; }
 .empty-note { color: var(--ink-dim); font-size: 14px; padding: 16px 4px; line-height: 1.5; }
@@ -1501,12 +1501,9 @@ function viewSummary() {
       <p class="list-title">Grocery list</p>
       ${w.groceries.length === 0
         ? '<p class="empty-note">Nothing on the list yet — tick staples on the Budget tab.</p>'
-        : w.groceries.map((g) => `
-          <div class="g-row shop-row ${g.checked ? 'is-checked' : ''}" id="shop-${g.id}">
-            <label class="tick">
-              <input type="checkbox" data-change="tick" data-row="${g.id}" ${g.checked ? 'checked' : ''}>
-              <span class="box">✓</span>
-            </label>
+        : w.groceries.map((g, i) => `
+          <div class="g-row shop-row">
+            <span class="g-num">${i + 1}.</span>
             <span class="g-name">${esc(g.name)}</span>
             <span class="money">${fmtNum(g.price)}</span>
           </div>`).join('')}
@@ -2017,13 +2014,6 @@ document.addEventListener('change', (e) => {
     scheduleSave();
   }
 
-  if (el.dataset.change === 'tick') {
-    const row = state.week.groceries.find((g) => g.id === el.dataset.row);
-    if (!row) return;
-    row.checked = el.checked;
-    scheduleSave();
-    $('#shop-' + row.id)?.classList.toggle('is-checked', el.checked);
-  }
 });
 
 document.addEventListener('submit', async (e) => {

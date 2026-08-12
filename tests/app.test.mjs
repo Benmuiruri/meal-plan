@@ -540,7 +540,7 @@ test('the menu board renders every lunch as an input: override escaped into valu
 
 test('the lunch change glue trims typed text and deletes the override when emptied', () => {
   const hStart = html.indexOf("if (el.dataset.change === 'lunch')");
-  const hEnd = html.indexOf("if (el.dataset.change === 'tick')");
+  const hEnd = html.indexOf("document.addEventListener('submit'");
   assert.ok(hStart > 0 && hEnd > hStart, 'lunch handler markers found in index.html');
   const live = html.slice(hStart, hEnd)
     .replace(/\/\*[\s\S]*?\*\//g, '')
@@ -1131,6 +1131,22 @@ test('the summary offers Save this week only once the menu is complete', () => {
   assert.match(viewsMod.viewSummary(), /data-action="save-week"/);
   viewsMod.vstate.week = fullWeek({ status: 'draft', picks: { mains: [], breakfasts: [] } });
   assert.doesNotMatch(viewsMod.viewSummary(), /data-action="save-week"/, 'a barely-started week cannot be frozen');
+});
+
+test('the summary grocery list is numbered, not a checklist', () => {
+  viewsMod.vstate.week = fullWeek({
+    status: 'draft',
+    groceries: [
+      { id: 'g1', name: 'Eggs', price: 300, checked: true },
+      { id: 'g2', name: 'Milk', price: 120, checked: false },
+    ],
+  });
+  const out = viewsMod.viewSummary();
+  assert.doesNotMatch(out, /data-change="tick"/, 'no live checkboxes on the summary');
+  assert.doesNotMatch(out, /is-checked/, 'a stale checked flag cannot strike items out');
+  assert.match(out, /<span class="g-num">1\.<\/span>\s*<span class="g-name">Eggs/,
+    'rows are numbered in list order');
+  assert.match(out, /<span class="g-num">2\.<\/span>\s*<span class="g-name">Milk/);
 });
 
 test('the history list walks loading, empty, and rows states', () => {
