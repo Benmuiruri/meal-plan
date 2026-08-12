@@ -971,8 +971,8 @@ function noticeSheet({ title, body }) {
   });
 }
 
-// Starting a tab over. Three answers, not two: null means there was nothing
-// to clear, which is not the same as the question having been declined.
+// Starting a tab over. null is neither yes nor no: nothing was cleared, for
+// a reason that was not your answer.
 async function clearPicks(tab) {
   const week = state.week;
   const count = week.picks[tab].length;
@@ -983,6 +983,10 @@ async function clearPicks(tab) {
     body: 'The days they filled go back to empty.',
     confirmLabel: 'Clear',
   }))) return false;
+  // unreachable today: an open question renders the page inert, and every
+  // re-init is gated on a phase this screen is not in. Kept as the wall —
+  // scheduleSave persists state.week, so a swap would save the wrong one.
+  if (state.week !== week) return null;
   week.picks[tab] = [];
   week.days = reconcileDays(week.picks, week.days);
   scheduleSave();

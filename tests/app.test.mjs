@@ -1465,6 +1465,20 @@ test('clearing empties the days those picks filled and keeps the lunches you typ
   await flushSave();
 });
 
+// no path reaches this today; the guard is kept because scheduleSave persists
+// state.week, so a swap mid-question would mutate one week and save another
+test('a week swapped mid-question abandons the clear instead of gutting the one that replaced it', async () => {
+  state.week.picks = { mains: ['m1', 'm2'], breakfasts: [] };
+  const abandoned = state.week;
+  const p = clearPicks('mains');
+  state.week = { ...abandoned, picks: { mains: ['m9'], breakfasts: [] }, days: {} };
+  settleConfirm(true);
+  assert.equal(await p, null, 'the week the question named is gone — its answer cannot travel');
+  assert.deepEqual(abandoned.picks.mains, ['m1', 'm2'], 'the discarded week is left as it was');
+  assert.deepEqual(state.week.picks.mains, ['m9'], 'and the fresh one keeps what it arrived with');
+  assert.equal(state.saveStatus, 'saved', 'nothing was saved either');
+});
+
 test('the question counts what it is about to drop, in the words of the tab it names', async () => {
   state.week.picks = { mains: ['m1', 'm2', 'm3', 'm4'], breakfasts: ['b1'] };
   const many = clearPicks('mains');
