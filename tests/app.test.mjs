@@ -1169,6 +1169,10 @@ test('the history detail is read-only and totals the week it shows', () => {
   assert.match(out, /Week of 2026-07-27/);
   assert.match(out, /MEAL-m3/, 'the board resolves meal names');
   assert.doesNotMatch(out, /data-change="tick"/, 'no live checkboxes in a record');
+  assert.doesNotMatch(out, /tick-static|is-checked/,
+    'a legacy checked flag renders no tick column — the record is a list, not a worksheet');
+  assert.match(out, /<span class="g-num">1\.<\/span>\s*<span class="g-name">Eggs/,
+    'the record is numbered like the summary');
   assert.doesNotMatch(out, /data-action="save-week"/);
   assert.match(out, /KSh 700/, 'remaining is computed from THAT week');
   assert.match(out, /href="#\/history"/, 'a way back to the list');

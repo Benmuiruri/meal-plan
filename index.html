@@ -419,7 +419,6 @@ input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; marg
   color: var(--ink); font-weight: 500;
 }
 .hist-row .money { color: var(--ink-dim); }
-.tick-static { width: 26px; flex-shrink: 0; text-align: center; color: var(--leaf); font-weight: 700; }
 
 .totals {
   position: fixed; left: 0; right: 0; bottom: var(--tabbar-h); z-index: 29;
@@ -450,8 +449,6 @@ input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; marg
 
 .shop-row { padding: 4px; }
 .g-num { width: 26px; flex-shrink: 0; text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; color: var(--ink-dim); }
-.shop-row.is-checked .g-name { text-decoration: line-through; opacity: 0.45; }
-.shop-row.is-checked .money { opacity: 0.45; }
 .empty-note { color: var(--ink-dim); font-size: 14px; padding: 16px 4px; line-height: 1.5; }
 
 /* ================================================================
@@ -1488,6 +1485,16 @@ function viewSumBoard(w) {
     </div>`;
 }
 
+// The numbered grocery list, shared by Summary and the read-only History view.
+function viewGroceryRows(groceries) {
+  return groceries.map((g, i) => `
+          <div class="g-row shop-row">
+            <span class="g-num">${i + 1}.</span>
+            <span class="g-name">${esc(g.name)}</span>
+            <span class="money">${fmtNum(g.price)}</span>
+          </div>`).join('');
+}
+
 function viewSummary() {
   const w = state.week;
   const hasWeek = picksComplete(w);
@@ -1501,12 +1508,7 @@ function viewSummary() {
       <p class="list-title">Grocery list</p>
       ${w.groceries.length === 0
         ? '<p class="empty-note">Nothing on the list yet — tick staples on the Budget tab.</p>'
-        : w.groceries.map((g, i) => `
-          <div class="g-row shop-row">
-            <span class="g-num">${i + 1}.</span>
-            <span class="g-name">${esc(g.name)}</span>
-            <span class="money">${fmtNum(g.price)}</span>
-          </div>`).join('')}
+        : viewGroceryRows(w.groceries)}
 
       ${hasWeek ? `
         <button type="button" class="btn-primary save-week-btn" data-action="save-week">
@@ -1566,12 +1568,7 @@ function viewHistoryDetail() {
       <p class="list-title">Grocery list</p>
       ${w.groceries.length === 0
         ? '<p class="empty-note">No groceries were listed.</p>'
-        : w.groceries.map((g) => `
-          <div class="g-row shop-row ${g.checked ? 'is-checked' : ''}">
-            <span class="tick-static">${g.checked ? '✓' : ''}</span>
-            <span class="g-name">${esc(g.name)}</span>
-            <span class="money">${fmtNum(g.price)}</span>
-          </div>`).join('')}
+        : viewGroceryRows(w.groceries)}
       <button type="button" class="btn-archive delete-week-btn" data-action="delete-week" data-id="${w.id}">
         Delete this week's record
       </button>
@@ -1994,7 +1991,7 @@ document.addEventListener('change', (e) => {
     if (el.checked) {
       state.week.groceries.push({
         id: crypto.randomUUID(), stapleId: staple.id, name: staple.name,
-        price: staple.last_price, checked: false,
+        price: staple.last_price,
       });
     } else {
       state.week.groceries = state.week.groceries.filter((g) => g.stapleId !== staple.id);
@@ -2106,7 +2103,7 @@ document.addEventListener('submit', async (e) => {
     const price = parseMoney(form.price.value);
     state.week.groceries.push({
       id: crypto.randomUUID(), stapleId: null, name,
-      price: price === undefined ? null : price, checked: false,
+      price: price === undefined ? null : price,
     });
     scheduleSave();
     render();
