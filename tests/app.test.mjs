@@ -36,11 +36,13 @@ function render() {}
 function viewSaveErrorBanner() { const k = state.saveErrorPermanent ? 'permanent' : 'transient'; return '<banner data-kind="' + k + '">' + k + '</banner>'; }
 export { state, db, scheduleSave, flushSave, signIn, resizeImage, isServerRejection,
          markDeadImage, reviveDeadImages, performSaveWeek, withCeiling, MEAL_REQUEST_CEILING_MS,
-         confirmSheet, settleConfirm, noticeSheet, togglePasswordField, isPasswordToggle };`;
+         confirmSheet, settleConfirm, noticeSheet, togglePasswordField, isPasswordToggle,
+         clearPicks };`;
 
 const { state, db, scheduleSave, flushSave, signIn, resizeImage, isServerRejection,
         markDeadImage, reviveDeadImages, performSaveWeek, withCeiling, MEAL_REQUEST_CEILING_MS,
-        confirmSheet, settleConfirm, noticeSheet, togglePasswordField, isPasswordToggle } =
+        confirmSheet, settleConfirm, noticeSheet, togglePasswordField, isPasswordToggle,
+        clearPicks } =
   await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(src));
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -1309,6 +1311,58 @@ test('viewPick moves archived meals to a restore list — unless they are still 
   assert.match(out, /Hold a meal/, 'long-press is invisible — the hint is the only signpost');
 });
 
+test('viewPick offers a way to start over only when there is something to start over from', async () => {
+  const tmplStart = html.indexOf('function viewPick');
+  const tmplEnd = html.indexOf('function viewAddSheet');
+  assert.ok(tmplStart > 0 && tmplEnd > tmplStart, 'viewPick markers found in index.html');
+  const escStart = html.indexOf('const esc =');
+  const escEnd = html.indexOf('[c]));', escStart);
+  const pickWith = async (mains) => (await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(
+    `const PICK_TARGET = 7;
+     const TINTS = ['#111'];
+     const KIND_FOR_TAB = { mains: 'main', breakfasts: 'breakfast' };
+     const state = { pickTab: 'mains', addOpen: false, editId: null,
+       week: { picks: { mains: ${JSON.stringify(mains)}, breakfasts: [] } },
+       meals: [{ id: 'm1', kind: 'main', name: 'Pilau', tint: '#123' }] };
+     ${html.slice(escStart, escEnd + '[c]));'.length)}
+     ${html.slice(tmplStart, tmplEnd)}
+     export { viewPick };`))).viewPick();
+
+  const fresh = await pickWith([]);
+  assert.doesNotMatch(fresh, /data-action="clear-picks"/, 'a fresh week has nothing to clear');
+  const started = await pickWith(['m1']);
+  assert.match(started, /data-action="clear-picks"/, 'one pick is enough to want to start over');
+  assert.match(started, /aria-label="Clear picked mains"/,
+    '"Clear" alone names nothing for a screen reader landing on the button');
+  assert.match(started, /class="pick-tally"[\s\S]*?1 \/ 7[\s\S]*?clear-picks/,
+    'the button rides with the count it clears, so space-between still pins the tally right');
+});
+
+test('the clear button keeps its box inside the sticky count row', () => {
+  const style = html.slice(html.indexOf('<style>'), html.indexOf('</style>'));
+  assert.match(style, /\.pick-tally\s*\{[^}]*display:\s*flex/,
+    'the count and the button are one group — three loose children would centre the count');
+  // measured at 375px: the row is 45px with no button and 45px with one. Drop
+  // either declaration below and it grows (2px centred-only, 2.5px line-height
+  // only), pushing the whole grid down the moment the first pick lands
+  assert.match(style, /\.pick-tally\s*\{[^}]*align-items:\s*center/,
+    'a baseline-aligned button hangs 2.5px below the count it sits beside');
+  assert.match(style, /\.pick-clear\s*\{[^}]*line-height:\s*1/,
+    "and a full line-height puts the button's box back outside the count's");
+});
+
+test('the clear button takes a thumb, not just a cursor', () => {
+  const style = html.slice(html.indexOf('<style>'), html.indexOf('</style>'));
+  assert.match(style, /\.pick-clear\s*\{[^}]*position:\s*relative/,
+    'the overlay anchors to the button, not to the sticky row');
+  assert.match(style, /\.pick-clear::after\s*\{[^}]*position:\s*absolute[^}]*\}/,
+    'a 23px-tall target is a miss on a phone, and this one clears the week');
+  // measured with elementFromPoint: -13px gives a 45px tap, -11px only 40.5px,
+  // because inset resolves against the padding box and the border eats 2px
+  assert.match(style, /\.pick-clear::after\s*\{[^}]*inset:\s*-13px/,
+    'growing the button itself would push the grid down — the hit area grows instead');
+});
+
 test('Escape closes a sheet, editor first, and defers to the write gate', () => {
   const s = html.indexOf("document.addEventListener('keydown'");
   assert.ok(s > 0, 'keydown wiring found in index.html');
@@ -1360,6 +1414,89 @@ test('an 8th pick asks nothing and saves nothing — it gets a notice and stops'
   assert.match(tp, /noticeSheet\(\{[\s\S]{0,140}?PICK_TARGET[\s\S]{0,140}?\}\);\s*return;/,
     'the full-board branch shows the notice and exits before any reconcile or save');
   assert.doesNotMatch(tp, /bump/, 'the counter bump is gone — the notice replaced it');
+});
+
+test('clearing empties the tab the question named and leaves the other alone', async () => {
+  state.week.picks = { mains: ['m1', 'm2'], breakfasts: ['b1'] };
+  const p = clearPicks('mains');
+  assert.ok(state.confirm, 'starting over is a question, not a silent wipe');
+  settleConfirm(true);
+  assert.equal(await p, true);
+  assert.deepEqual(state.week.picks.mains, []);
+  assert.deepEqual(state.week.picks.breakfasts, ['b1'], 'the tab nobody asked about keeps its picks');
+  assert.equal(state.saveStatus, 'saving', 'the emptied week is on its way to the server');
+  db.client = fakeWeeksClient();
+  await flushSave();                       // disarm the debounce this test armed
+});
+
+test('a declined clear changes nothing and saves nothing', async () => {
+  state.week.picks = { mains: ['m1', 'm2'], breakfasts: [] };
+  const p = clearPicks('mains');
+  settleConfirm(false);
+  assert.equal(await p, false);
+  assert.deepEqual(state.week.picks.mains, ['m1', 'm2']);
+  assert.equal(state.saveStatus, 'saved', 'a cancelled question must not arm a save');
+});
+
+test('nothing picked is its own answer — no question, no save', async () => {
+  state.week.picks = { mains: [], breakfasts: ['b1'] };
+  assert.equal(await clearPicks('mains'), null,
+    'null is "there was nothing to clear" — false would read as "you cancelled"');
+  assert.equal(state.confirm, null, 'no question was ever asked');
+  assert.equal(state.saveStatus, 'saved');
+});
+
+test('clearing empties the days those picks filled and keeps the lunches you typed', async () => {
+  state.week.picks = { mains: ['m1', 'm2'], breakfasts: ['b1'] };
+  state.week.days = {
+    mon: { dinner: 'm1', breakfast: 'b1', lunch: 'Leftovers' },
+    tue: { dinner: 'm2', breakfast: null },
+  };
+  const p = clearPicks('mains');
+  settleConfirm(true);
+  await p;
+  assert.equal(state.week.days.mon.dinner, null, 'the dinner it filled goes back to empty');
+  assert.equal(state.week.days.tue.dinner, null);
+  assert.equal(state.week.days.mon.breakfast, 'b1', 'the other tab keeps the days it filled');
+  assert.equal(state.week.days.mon.lunch, 'Leftovers', 'a lunch you typed is your words, not a pick');
+  db.client = fakeWeeksClient();
+  await flushSave();
+});
+
+// the question is answered in a microtask no tap can beat, but a resync can
+// land between the ask and the answer — its new week never agreed to anything
+test('a resync mid-question abandons the clear instead of gutting the week that replaced it', async () => {
+  state.week.picks = { mains: ['m1', 'm2'], breakfasts: [] };
+  const abandoned = state.week;
+  const p = clearPicks('mains');
+  state.week = { ...abandoned, picks: { mains: ['m9'], breakfasts: [] }, days: {} };
+  settleConfirm(true);
+  assert.equal(await p, null, 'the week the question named is gone — its answer cannot travel');
+  assert.deepEqual(abandoned.picks.mains, ['m1', 'm2'], 'the discarded week is left as it was');
+  assert.deepEqual(state.week.picks.mains, ['m9'], 'and the fresh one keeps what it arrived with');
+  assert.equal(state.saveStatus, 'saved', 'nothing was saved either');
+});
+
+test('the question counts what it is about to drop, in the words of the tab it names', async () => {
+  state.week.picks = { mains: ['m1', 'm2', 'm3', 'm4'], breakfasts: ['b1'] };
+  const many = clearPicks('mains');
+  assert.equal(state.confirm.title, 'Clear 4 picked mains?');
+  assert.equal(state.confirm.confirmLabel, 'Clear');
+  settleConfirm(false);
+  await many;
+
+  const one = clearPicks('breakfasts');
+  assert.equal(state.confirm.title, 'Clear 1 picked breakfast?', 'one pick is not "1 breakfasts"');
+  settleConfirm(false);
+  await one;
+});
+
+test('the clear action is delegation only — the logic lives where the tests can reach it', () => {
+  const at = html.indexOf("'clear-picks':");
+  assert.ok(at > 0, 'clear-picks action found in index.html');
+  const body = html.slice(at, html.indexOf("'open-add':", at));
+  assert.match(body, /^'clear-picks': \(\) => \{ clearPicks\(state\.pickTab\); \},/,
+    'anything more here is behaviour the app slice cannot import, so nothing above covers it');
 });
 
 test('every error-phase site names its own heading', () => {

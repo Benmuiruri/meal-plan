@@ -208,6 +208,17 @@ h2.screen-title {
 }
 .pick-count .label { font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink-dim); }
 .pick-count .count { font-family: var(--mono); font-size: 20px; font-weight: 500; }
+/* the count sets the row height. Centring the button and holding it to one
+   line keep its box within the count's, so the grid does not shift on pick 1 */
+.pick-tally { display: flex; align-items: center; gap: 12px; }
+.pick-clear {
+  position: relative;
+  border: 2px solid var(--ink); border-radius: 8px; padding: 3px 10px;
+  font-size: 13px; font-weight: 700; line-height: 1; flex-shrink: 0;
+}
+/* the row caps the button at 23px, a miss under a thumb. inset resolves against
+   the padding box, so -13px (not -11) stretches the tap area to the row's 45px */
+.pick-clear::after { content: ''; position: absolute; inset: -13px -8px; }
 
 .pick-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .meal-card {
@@ -960,6 +971,28 @@ function noticeSheet({ title, body }) {
   });
 }
 
+// Starting a tab over. Three answers, not two: null means there was nothing
+// to clear, which is not the same as the question having been declined.
+async function clearPicks(tab) {
+  const week = state.week;
+  const count = week.picks[tab].length;
+  if (!count) return null;
+  const noun = KIND_FOR_TAB[tab];
+  if (!(await confirmSheet({
+    title: `Clear ${count} picked ${count === 1 ? noun : noun + 's'}?`,
+    body: 'The days they filled go back to empty.',
+    confirmLabel: 'Clear',
+  }))) return false;
+  // a resync mid-question swaps state.week wholesale — the week that answered
+  // is already discarded, and the fresh one never agreed to anything
+  if (state.week !== week) return null;
+  week.picks[tab] = [];
+  week.days = reconcileDays(week.picks, week.days);
+  scheduleSave();
+  render();
+  return true;
+}
+
 // Volatile flag: a failed card photo degrades to the tinted tile. Cleared
 // ONLY by an online transition or a meals reload — a failure while the
 // browser stayed "online" keeps the tile; broader revival would refetch
@@ -1204,7 +1237,12 @@ function viewPick() {
       </div>
       <div class="pick-count">
         <span class="label">${state.pickTab === 'mains' ? 'Mains picked' : 'Breakfasts picked'}</span>
-        <span class="count money">${picked.length} / ${PICK_TARGET}</span>
+        <span class="pick-tally">
+          <span class="count money">${picked.length} / ${PICK_TARGET}</span>
+          ${picked.length ? `
+            <button type="button" class="pick-clear" data-action="clear-picks"
+                    aria-label="Clear picked ${state.pickTab}">Clear</button>` : ''}
+        </span>
       </div>
       <div class="pick-grid">
         ${cards.map((m) => {
@@ -1642,6 +1680,8 @@ const actions = {
     scheduleSave();
     render();
   },
+
+  'clear-picks': () => { clearPicks(state.pickTab); },
 
   'open-add': () => {
     state.addOpen = true;
