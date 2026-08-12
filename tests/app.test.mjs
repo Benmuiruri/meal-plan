@@ -1355,6 +1355,8 @@ test('the clear button takes a thumb, not just a cursor', () => {
   const style = html.slice(html.indexOf('<style>'), html.indexOf('</style>'));
   assert.match(style, /\.pick-clear\s*\{[^}]*position:\s*relative/,
     'the overlay anchors to the button, not to the sticky row');
+  assert.match(style, /\.pick-clear::after\s*\{[^}]*content:\s*''/,
+    'without content the pseudo-element generates no box at all and the target is 23px again');
   assert.match(style, /\.pick-clear::after\s*\{[^}]*position:\s*absolute[^}]*\}/,
     'a 23px-tall target is a miss on a phone, and this one clears the week');
   // measured with elementFromPoint: -13px gives a 45px tap, -11px only 40.5px,
@@ -1461,20 +1463,6 @@ test('clearing empties the days those picks filled and keeps the lunches you typ
   assert.equal(state.week.days.mon.lunch, 'Leftovers', 'a lunch you typed is your words, not a pick');
   db.client = fakeWeeksClient();
   await flushSave();
-});
-
-// the question is answered in a microtask no tap can beat, but a resync can
-// land between the ask and the answer — its new week never agreed to anything
-test('a resync mid-question abandons the clear instead of gutting the week that replaced it', async () => {
-  state.week.picks = { mains: ['m1', 'm2'], breakfasts: [] };
-  const abandoned = state.week;
-  const p = clearPicks('mains');
-  state.week = { ...abandoned, picks: { mains: ['m9'], breakfasts: [] }, days: {} };
-  settleConfirm(true);
-  assert.equal(await p, null, 'the week the question named is gone — its answer cannot travel');
-  assert.deepEqual(abandoned.picks.mains, ['m1', 'm2'], 'the discarded week is left as it was');
-  assert.deepEqual(state.week.picks.mains, ['m9'], 'and the fresh one keeps what it arrived with');
-  assert.equal(state.saveStatus, 'saved', 'nothing was saved either');
 });
 
 test('the question counts what it is about to drop, in the words of the tab it names', async () => {

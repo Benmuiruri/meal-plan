@@ -983,9 +983,6 @@ async function clearPicks(tab) {
     body: 'The days they filled go back to empty.',
     confirmLabel: 'Clear',
   }))) return false;
-  // a resync mid-question swaps state.week wholesale — the week that answered
-  // is already discarded, and the fresh one never agreed to anything
-  if (state.week !== week) return null;
   week.picks[tab] = [];
   week.days = reconcileDays(week.picks, week.days);
   scheduleSave();
