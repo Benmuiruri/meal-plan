@@ -983,11 +983,17 @@ async function clearPicks(tab) {
     body: 'The days they filled go back to empty.',
     confirmLabel: 'Clear',
   }))) return false;
-  // unreachable today (an open question renders the page inert, and every
-  // re-init is gated on a phase this screen is not in), but kept: scheduleSave
-  // persists state.week, so a swap would save the wrong week. Silent on purpose
-  // — a swap lands in a gate phase, where render() paints no sheet anyway.
-  if (state.week !== week) return null;
+  // unreachable today: the page is inert under an open question, and
+  // lockOnUnknownWrite settles it to false before the error screen — the one
+  // path that could otherwise let a swap meet a live question. Kept because
+  // scheduleSave persists state.week, so a swap would save the wrong week.
+  if (state.week !== week) {
+    noticeSheet({
+      title: 'The week moved on',
+      body: 'It reloaded while you were deciding — nothing was cleared.',
+    });
+    return null;
+  }
   week.picks[tab] = [];
   week.days = reconcileDays(week.picks, week.days);
   scheduleSave();

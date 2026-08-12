@@ -1487,6 +1487,27 @@ test('a week swapped mid-question abandons the clear instead of gutting the one 
   }
 });
 
+// the wall's answer is a return value nobody reads, so without this the tap
+// that reached it produces nothing. It does paint: confirm-yes only exists
+// where render() drew the sheet, so the answer always arrives in a screen phase
+test('a wall that fires says so — a confirmed tap is never answered with silence', async () => {
+  state.week.picks = { mains: ['m1', 'm2'], breakfasts: [] };
+  const p = clearPicks('mains');
+  state.week = { ...state.week, picks: { mains: ['m9'], breakfasts: [] }, days: {} };
+  settleConfirm(true);
+  try {
+    await p;
+    assert.ok(state.confirm?.notice, 'the tap produced something to look at');
+    assert.match(state.confirm.title, /moved on/);
+  } finally {
+    // deleting the guard reaches scheduleSave, and the assertions above would
+    // throw first: beforeEach clears neither the timer nor state.confirm
+    settleConfirm(false);
+    db.client = fakeWeeksClient();
+    await flushSave();
+  }
+});
+
 test('the question counts what it is about to drop, in the words of the tab it names', async () => {
   state.week.picks = { mains: ['m1', 'm2', 'm3', 'm4'], breakfasts: ['b1'] };
   const many = clearPicks('mains');
