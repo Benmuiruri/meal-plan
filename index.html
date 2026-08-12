@@ -986,7 +986,13 @@ async function clearPicks(tab) {
   // unreachable today: an open question renders the page inert, and every
   // re-init is gated on a phase this screen is not in. Kept as the wall —
   // scheduleSave persists state.week, so a swap would save the wrong one.
-  if (state.week !== week) return null;
+  if (state.week !== week) {
+    noticeSheet({
+      title: 'The week moved on',
+      body: 'It reloaded while you were deciding — nothing was cleared.',
+    });
+    return null;
+  }
   week.picks[tab] = [];
   week.days = reconcileDays(week.picks, week.days);
   scheduleSave();

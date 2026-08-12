@@ -1473,10 +1473,31 @@ test('a week swapped mid-question abandons the clear instead of gutting the one 
   const p = clearPicks('mains');
   state.week = { ...abandoned, picks: { mains: ['m9'], breakfasts: [] }, days: {} };
   settleConfirm(true);
-  assert.equal(await p, null, 'the week the question named is gone — its answer cannot travel');
-  assert.deepEqual(abandoned.picks.mains, ['m1', 'm2'], 'the discarded week is left as it was');
-  assert.deepEqual(state.week.picks.mains, ['m9'], 'and the fresh one keeps what it arrived with');
-  assert.equal(state.saveStatus, 'saved', 'nothing was saved either');
+  try {
+    assert.equal(await p, null, 'the week the question named is gone — its answer cannot travel');
+    assert.deepEqual(abandoned.picks.mains, ['m1', 'm2'], 'the discarded week is left as it was');
+    assert.deepEqual(state.week.picks.mains, ['m9'], 'and the fresh one keeps what it arrived with');
+    assert.equal(state.saveStatus, 'saved', 'nothing was saved either');
+  } finally {
+    // deleting the guard is what this test catches, and that path DOES arm the
+    // debounce — one red test, not one red test plus a timer loose in the suite
+    settleConfirm(false);
+    db.client = fakeWeeksClient();
+    await flushSave();
+  }
+});
+
+// the wall's answer is a return value nobody reads — the sole caller discards
+// the promise, so without this the user confirms and the screen just sits there
+test('a wall that fires says so — a confirmed tap is never answered with silence', async () => {
+  state.week.picks = { mains: ['m1', 'm2'], breakfasts: [] };
+  const p = clearPicks('mains');
+  state.week = { ...state.week, picks: { mains: ['m9'], breakfasts: [] }, days: {} };
+  settleConfirm(true);
+  await p;
+  assert.ok(state.confirm?.notice, 'the tap produced something to look at');
+  assert.match(state.confirm.title, /moved on/);
+  settleConfirm(false); // beforeEach does not clear state.confirm — do not leak it
 });
 
 test('the question counts what it is about to drop, in the words of the tab it names', async () => {
