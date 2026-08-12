@@ -36,11 +36,11 @@ function render() {}
 function viewSaveErrorBanner() { const k = state.saveErrorPermanent ? 'permanent' : 'transient'; return '<banner data-kind="' + k + '">' + k + '</banner>'; }
 export { state, db, scheduleSave, flushSave, signIn, resizeImage, isServerRejection,
          markDeadImage, reviveDeadImages, performSaveWeek, withCeiling, MEAL_REQUEST_CEILING_MS,
-         confirmSheet, settleConfirm, noticeSheet };`;
+         confirmSheet, settleConfirm, noticeSheet, togglePasswordField, isPasswordToggle };`;
 
 const { state, db, scheduleSave, flushSave, signIn, resizeImage, isServerRejection,
         markDeadImage, reviveDeadImages, performSaveWeek, withCeiling, MEAL_REQUEST_CEILING_MS,
-        confirmSheet, settleConfirm, noticeSheet } =
+        confirmSheet, settleConfirm, noticeSheet, togglePasswordField, isPasswordToggle } =
   await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(src));
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -135,9 +135,14 @@ test('the real sign-in template emits and escapes the kept email and error messa
   const escStart = html.indexOf('const esc =');
   const escEnd = html.indexOf('[c]));', escStart);
   assert.ok(escStart > 0 && escEnd > escStart, 'esc markers found in index.html');
+  // the real ICONS too — the template reads it, so a stub here could drift
+  const iconsStart = html.indexOf('const ICONS = {');
+  const iconsEnd = html.indexOf('};', iconsStart);
+  assert.ok(iconsStart > 0 && iconsEnd > iconsStart, 'ICONS markers found in index.html');
   const mod = await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(
     `const state = { signinEmail: 'kept"@example.com', errorMsg: '<b>boom</b>' };
      ${html.slice(escStart, escEnd + '[c]));'.length)}
+     ${html.slice(iconsStart, iconsEnd + 2)}
      const viewGate = (inner) => inner;
      ${html.slice(tmplStart, tmplEnd)}
      export { viewSignin };`));
@@ -145,6 +150,96 @@ test('the real sign-in template emits and escapes the kept email and error messa
   assert.match(out, /value="kept&quot;@example\.com"/, 'email is emitted AND attribute-escaped');
   assert.match(out, /&lt;b&gt;boom&lt;\/b&gt;/, 'error message is html-escaped');
   assert.match(out, /type="password"/);
+});
+
+// a fake just observable enough for the toggle: the type, the pressed flag
+// and the caret are the whole contract
+function fakePasswordField({ type = 'password', pressed = 'false' } = {}) {
+  const input = {
+    _type: type, value: 'hunter2', selectionStart: 3, selectionEnd: 3,
+    focused: false, focus() { this.focused = true; },
+    get type() { return this._type; },
+    // a real browser drops the caret to the end when the type changes; without
+    // that here, the restore assertion below passes with the restore deleted
+    set type(t) { this._type = t; this.selectionStart = this.selectionEnd = this.value.length; },
+    setSelectionRange(s, e) { this.selectionStart = s; this.selectionEnd = e; },
+  };
+  const attrs = { 'aria-pressed': pressed };
+  const btn = {
+    getAttribute: (k) => attrs[k] ?? null,
+    setAttribute: (k, v) => { attrs[k] = String(v); },
+    attrs,
+    parentElement: { querySelector: (sel) => (sel.includes('input') ? input : null) },
+  };
+  return { input, btn, attrs };
+}
+
+test('the password toggle flips the field in place and keeps the caret where it was', () => {
+  const { input, btn, attrs } = fakePasswordField();
+  assert.equal(togglePasswordField(btn), true, 'the first press reveals');
+  assert.equal(input.type, 'text', 'the field is readable');
+  assert.equal(attrs['aria-pressed'], 'true', 'the button says so');
+  assert.equal(input.value, 'hunter2', 'the typed password is untouched');
+  assert.deepEqual([input.selectionStart, input.selectionEnd], [3, 3],
+    'a type flip resets the caret in some browsers — it is put back');
+
+  assert.equal(togglePasswordField(btn), false, 'pressing again hides');
+  assert.equal(input.type, 'password');
+  assert.equal(attrs['aria-pressed'], 'false');
+});
+
+test('the password toggle reads its state from the button, not a module variable', () => {
+  // two independent presses of a button already marked pressed must both
+  // hide — a private boolean would flip-flop instead
+  const a = fakePasswordField({ type: 'text', pressed: 'true' });
+  const b = fakePasswordField({ type: 'text', pressed: 'true' });
+  assert.equal(togglePasswordField(a.btn), false);
+  assert.equal(togglePasswordField(b.btn), false);
+  assert.equal(a.input.type, 'password');
+  assert.equal(b.input.type, 'password');
+});
+
+test('the password toggle survives a button with no field beside it', () => {
+  const orphan = { getAttribute: () => 'false', setAttribute: () => {}, parentElement: { querySelector: () => null } };
+  assert.doesNotThrow(() => togglePasswordField(orphan));
+});
+
+test('the toggle never re-renders — a render would wipe the password being typed', () => {
+  const at = html.indexOf("'toggle-password':");
+  assert.ok(at > 0, 'toggle-password action found in index.html');
+  const body = html.slice(at, html.indexOf("'confirm-yes':", at));
+  assert.ok(body.length > 0 && body.length < 400, 'the action body is bounded by the next action');
+  // the exact shape, not just the absence of the word "render": any added
+  // statement is a repaint waiting to happen, whatever it is spelled
+  assert.match(body, /^'toggle-password': \(el\) => \{ togglePasswordField\(el\); \},/,
+    'the action is the delegation and nothing else — the password lives only in the DOM');
+});
+
+test('the focus guard recognises the toggle and nothing else', () => {
+  const SEL = '[data-action="toggle-password"]';
+  const onToggle = { closest: (s) => (s === SEL ? onToggle : null) };
+  const elsewhere = { closest: () => null };
+  assert.equal(isPasswordToggle(onToggle), true, 'a press on the toggle is guarded');
+  assert.equal(isPasswordToggle(elsewhere), false, 'every other press is left alone');
+  assert.equal(isPasswordToggle(null), false, 'and a targetless event does not throw');
+});
+
+test('the toggle refuses focus so the caret and the phone keyboard stay put', () => {
+  const at = html.indexOf("document.addEventListener('mousedown'");
+  assert.ok(at > 0, 'the focus guard is wired in index.html');
+  const live = html.slice(at, html.indexOf('});', at)).replace(/\/\/[^\n]*/g, '');
+  assert.match(live, /if \(isPasswordToggle\(e\.target\)\) e\.preventDefault\(\);/,
+    'the wiring is exactly the tested predicate guarding the one call that keeps focus');
+});
+
+test('the reveal button carries its own CSS: one icon at a time, and text kept off it', () => {
+  const style = html.slice(html.indexOf('<style>'), html.indexOf('</style>'));
+  assert.match(style, /\.pw-toggle\s*\{[^}]*position:\s*absolute/,
+    'the button is laid over the field, not stacked after it');
+  assert.match(style, /\.field-password\s+\.field\s*\{[^}]*padding-right:\s*\d+px/,
+    'without the padding a long password runs under the icon');
+  assert.match(style, /\.pw-toggle\[aria-pressed="false"\]\s+\.icon-eye-off\s*,\s*\.pw-toggle\[aria-pressed="true"\]\s+\.icon-eye\s*\{[^}]*display:\s*none/,
+    'the pressed state is what picks the icon — without this rule both show at once');
 });
 
 test('the sign-in submit glue kicks initData directly (a stalled SIGNED_IN cannot strand loading)', () => {
@@ -158,6 +253,11 @@ test('the sign-in submit glue kicks initData directly (a stalled SIGNED_IN canno
     .replace(/\/\/[^\n]*/g, '');
   assert.match(live, /await signIn\(/);
   assert.match(live, /initData\(\)/);
+  // the reveal toggle is the first button in the form now, so a bare
+  // querySelector('button') disables the eye and leaves sign-in double-tappable
+  assert.doesNotMatch(live, /querySelector\('button'\)/,
+    'the guard must name the submit button, not take whichever button comes first');
+  assert.match(live, /querySelector\('button\[type="submit"\]'\)\.disabled = true/);
 });
 
 test('saveWeek restores a vanished row on the natural key and adopts the canonical id', async () => {
@@ -1490,6 +1590,26 @@ test('a notice renders one button — Okay, no Cancel — and its backdrop still
   assert.doesNotMatch(outside, /btn-quiet/, 'no Cancel on a notice');
   assert.match(outside, /sheet-backdrop is-top" data-action="confirm-no"/, 'tapping outside still dismisses');
   s.confirm = null;
+});
+
+test('the sign-in screen renders a reveal button that cannot submit the form', () => {
+  const s = renderMod.rstate;
+  s.phase = 'signin';
+  const out = renderToHtml();
+  assert.match(out, /name="password"[^>]*>\s*<button type="button"[^>]*data-action="toggle-password"/,
+    'the toggle sits beside the field it reveals, and type="button" keeps it from submitting');
+  // the toggle precedes the submit button — the submit guard must select by
+  // type, not by position (see the sign-in submit glue test)
+  const form = out.slice(out.indexOf('<form id="form-signin"'));
+  assert.match(form.match(/<button[^>]*>/)[0], /data-action="toggle-password"/,
+    'the first button in the form is the toggle, not Sign in');
+  assert.match(out, /aria-pressed="false"/, 'the field starts hidden');
+  assert.match(out, /aria-label="Show password"/, 'the control says what it does');
+  assert.match(out, /type="password"/, 'the markup itself never ships a revealed password');
+  // both icons ship once; CSS picks by pressed state, so no innerHTML swap
+  assert.equal((out.match(/class="icon-eye"/g) ?? []).length, 1);
+  assert.equal((out.match(/class="icon-eye-off"/g) ?? []).length, 1);
+  s.phase = 'ready';
 });
 
 test('the error screen wears the heading its site chose, not a hard-coded one', () => {

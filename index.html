@@ -162,6 +162,20 @@ h2.screen-title {
   border: 2px solid var(--ink); border-radius: 10px;
   background: #fff; font-size: 16px;
 }
+.field-password { position: relative; margin-bottom: 12px; }
+/* the field keeps its own box; the button is laid over its right end, and the
+   padding is what stops a long password running under the icon */
+.field-password .field { margin-bottom: 0; padding-right: 52px; }
+.pw-toggle {
+  position: absolute; top: 0; right: 0; height: 100%; width: 50px;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--ink-dim);
+}
+.pw-toggle svg { width: 22px; height: 22px; }
+.pw-toggle[aria-pressed="true"] { color: var(--ink); }
+.pw-toggle[aria-pressed="false"] .icon-eye-off,
+.pw-toggle[aria-pressed="true"] .icon-eye { display: none; }
+
 .field-file { display: flex; flex-direction: column; gap: 6px; cursor: pointer; }
 .field-file > span { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink-dim); }
 .btn-primary {
@@ -515,6 +529,22 @@ const SEED_STAPLES = [
    3. UTILITIES
    ================================================================ */
 const $ = (sel) => document.querySelector(sel);
+
+const isPasswordToggle = (el) => !!el?.closest?.('[data-action="toggle-password"]');
+
+// The revealed/hidden flag lives on the button, never in state: state drives
+// render(), and a repaint would wipe the password being typed.
+function togglePasswordField(btn) {
+  const input = btn.parentElement?.querySelector('input');
+  if (!input) return false;
+  const reveal = btn.getAttribute('aria-pressed') !== 'true';
+  const { selectionStart, selectionEnd } = input;
+  input.type = reveal ? 'text' : 'password';
+  btn.setAttribute('aria-pressed', String(reveal));
+  // the type flip drops the caret to the end in some browsers
+  if (selectionStart != null) input.setSelectionRange?.(selectionStart, selectionEnd);
+  return reveal;
+}
 
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) =>
   ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
@@ -1072,6 +1102,8 @@ const ICONS = {
   budget: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="3" y="7" width="18" height="13" rx="2"/><path d="M16.5 13.5h.01M3 7l13-3.6L17.5 7"/></svg>',
   summary: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M6 3.5h12V21l-2.4-1.7L13.2 21l-2.4-1.7L8.4 21 6 19.3z"/><path d="M9.5 8.5h5M9.5 12.5h5"/></svg>',
   history: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>',
+  eye: '<svg class="icon-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M1.9 12S5.5 5.6 12 5.6 22.1 12 22.1 12 18.5 18.4 12 18.4 1.9 12 1.9 12Z"/><circle cx="12" cy="12" r="3.1"/></svg>',
+  eyeOff: '<svg class="icon-eye-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M1.9 12S5.5 5.6 12 5.6 22.1 12 22.1 12 18.5 18.4 12 18.4 1.9 12 1.9 12Z"/><circle cx="12" cy="12" r="3.1"/><path d="M4.2 19.8 19.8 4.2"/></svg>',
 };
 
 function viewHeader() {
@@ -1138,7 +1170,10 @@ function viewSignin() {
     <p>One household account — the same email and password works for both of you, on any device. Each device stays signed in.</p>
     <form id="form-signin">
       <input class="field" type="email" name="email" placeholder="Email" required autocomplete="username" value="${esc(state.signinEmail)}">
-      <input class="field" type="password" name="password" placeholder="Password" required autocomplete="current-password">
+      <div class="field-password">
+        <input class="field" type="password" name="password" placeholder="Password" required autocomplete="current-password">
+        <button type="button" class="pw-toggle" data-action="toggle-password" aria-pressed="false" aria-label="Show password">${ICONS.eye}${ICONS.eyeOff}</button>
+      </div>
       <button class="btn-primary" type="submit">Sign in</button>
       ${state.errorMsg ? `<p class="error">${esc(state.errorMsg)}</p>` : ''}
     </form>`);
@@ -1623,6 +1658,10 @@ const actions = {
     state.editId = null; state.editName = ''; state.errorMsg = ''; render();
   },
 
+  // no render(): the typed password exists only in the DOM, so a repaint here
+  // would erase what the user came to check
+  'toggle-password': (el) => { togglePasswordField(el); },
+
   'confirm-yes': () => settleConfirm(true),
   'confirm-no': () => settleConfirm(false),
 
@@ -1802,6 +1841,12 @@ document.addEventListener('click', (e) => {
   if (el) actions[el.dataset.action]?.(el);
 });
 
+// taking focus would drop the caret and, on a phone, close the keyboard
+// mid-password — the toggle does its work without ever holding focus
+document.addEventListener('mousedown', (e) => {
+  if (isPasswordToggle(e.target)) e.preventDefault();
+});
+
 // Escape is the keyboard way out of a sheet — the in-flight guards still hold
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
@@ -1937,7 +1982,8 @@ document.addEventListener('submit', async (e) => {
   const form = e.target;
 
   if (form.id === 'form-signin') {
-    form.querySelector('button').disabled = true;
+    // by type, not by position: the reveal toggle is the form's first button
+    form.querySelector('button[type="submit"]').disabled = true;
     const ok = await signIn(form.email.value.trim(), form.password.value);
     if (ok) {
       state.phase = 'loading';
