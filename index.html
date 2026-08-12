@@ -34,6 +34,7 @@
   --mono:    'DM Mono', monospace;
 
   --radius: 12px;
+  --field-gap: 12px; /* one row rhythm: .field and the wrapper that stands in for it */
   --tabbar-h: calc(58px + env(safe-area-inset-bottom));
 }
 
@@ -158,11 +159,11 @@ h2.screen-title {
 .gate-card .error { color: var(--tomato); font-weight: 600; font-size: 13px; margin-top: 10px; }
 
 .field {
-  width: 100%; padding: 12px 14px; margin-bottom: 12px;
+  width: 100%; padding: 12px 14px; margin-bottom: var(--field-gap);
   border: 2px solid var(--ink); border-radius: 10px;
   background: #fff; font-size: 16px;
 }
-.field-password { position: relative; margin-bottom: 12px; }
+.field-password { position: relative; margin-bottom: var(--field-gap); }
 /* the field keeps its own box; the button is laid over its right end, and the
    padding is what stops a long password running under the icon */
 .field-password .field { margin-bottom: 0; padding-right: 52px; }
@@ -536,7 +537,7 @@ const isPasswordToggle = (el) => !!el?.closest?.('[data-action="toggle-password"
 // render(), and a repaint would wipe the password being typed.
 function togglePasswordField(btn) {
   const input = btn.parentElement?.querySelector('input');
-  if (!input) return false;
+  if (!input) return null; // not "hidden now" — there was nothing to hide
   const reveal = btn.getAttribute('aria-pressed') !== 'true';
   const { selectionStart, selectionEnd } = input;
   input.type = reveal ? 'text' : 'password';

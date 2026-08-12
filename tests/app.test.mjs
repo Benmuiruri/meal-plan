@@ -199,9 +199,16 @@ test('the password toggle reads its state from the button, not a module variable
   assert.equal(b.input.type, 'password');
 });
 
-test('the password toggle survives a button with no field beside it', () => {
-  const orphan = { getAttribute: () => 'false', setAttribute: () => {}, parentElement: { querySelector: () => null } };
-  assert.doesNotThrow(() => togglePasswordField(orphan));
+test('a toggle with no field beside it says so, and claims no state it never reached', () => {
+  const attrs = { 'aria-pressed': 'false' };
+  const orphan = {
+    getAttribute: (k) => attrs[k] ?? null,
+    setAttribute: (k, v) => { attrs[k] = String(v); },
+    parentElement: { querySelector: () => null },
+  };
+  assert.equal(togglePasswordField(orphan), null,
+    'nothing to toggle is its own answer — false would read as "hidden now"');
+  assert.equal(attrs['aria-pressed'], 'false', 'and the button is left as it was');
 });
 
 test('the toggle never re-renders — a render would wipe the password being typed', () => {
@@ -238,6 +245,10 @@ test('the reveal button carries its own CSS: one icon at a time, and text kept o
     'the button is laid over the field, not stacked after it');
   assert.match(style, /\.field-password\s+\.field\s*\{[^}]*padding-right:\s*\d+px/,
     'without the padding a long password runs under the icon');
+  // the wrapper stands in for the field it wraps, so the row rhythm has to be
+  // one value — restated literally, the password row drifts when .field moves
+  assert.match(style, /\.field\s*\{[^}]*margin-bottom:\s*var\(--field-gap\)/);
+  assert.match(style, /\.field-password\s*\{[^}]*margin-bottom:\s*var\(--field-gap\)/);
   assert.match(style, /\.pw-toggle\[aria-pressed="false"\]\s+\.icon-eye-off\s*,\s*\.pw-toggle\[aria-pressed="true"\]\s+\.icon-eye\s*\{[^}]*display:\s*none/,
     'the pressed state is what picks the icon — without this rule both show at once');
 });
