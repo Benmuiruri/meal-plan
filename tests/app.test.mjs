@@ -247,6 +247,9 @@ test('the reveal button carries its own CSS: one icon at a time, and text kept o
     'without the padding a long password runs under the icon');
   // the wrapper stands in for the field it wraps, so the row rhythm has to be
   // one value — restated literally, the password row drifts when .field moves
+  // the token itself, not just the two references: undeclared, var() falls back
+  // to nothing and every field in the form loses its spacing silently
+  assert.match(style, /:root\s*\{[^}]*--field-gap:\s*\d+px/, 'the rhythm is declared');
   assert.match(style, /\.field\s*\{[^}]*margin-bottom:\s*var\(--field-gap\)/);
   assert.match(style, /\.field-password\s*\{[^}]*margin-bottom:\s*var\(--field-gap\)/);
   assert.match(style, /\.pw-toggle\[aria-pressed="false"\]\s+\.icon-eye-off\s*,\s*\.pw-toggle\[aria-pressed="true"\]\s+\.icon-eye\s*\{[^}]*display:\s*none/,
