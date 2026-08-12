@@ -983,10 +983,10 @@ async function clearPicks(tab) {
     body: 'The days they filled go back to empty.',
     confirmLabel: 'Clear',
   }))) return false;
-  // unreachable today: the page is inert under an open question, and
-  // lockOnUnknownWrite settles it to false before the error screen — the one
-  // path that could otherwise let a swap meet a live question. Kept because
-  // scheduleSave persists state.week, so a swap would save the wrong week.
+  // unreachable while the page stays inert under an open question and every
+  // teardown answers it first — the error lock, Escape, a back gesture, a
+  // sign-out. Kept because scheduleSave persists state.week, so a swap would
+  // save a week this question never named.
   if (state.week !== week) {
     noticeSheet({
       title: 'The week moved on',
@@ -2225,6 +2225,8 @@ async function boot(client) {
     state.session = session;
     if (event === 'SIGNED_IN' && state.phase !== 'ready') initData();
     if (event === 'SIGNED_OUT') {
+      settleConfirm(false); // signing out answers the question — one left open
+                            // outlives the session and repaints over a new week
       state.phase = 'signin';
       render();
     }

@@ -1547,6 +1547,16 @@ test('a back gesture answers an open question before any sheet teardown', () => 
     'an unanswered question would strand the flow awaiting it');
 });
 
+// the one teardown that used to strand a question: an open confirm survived
+// SIGNED_OUT, and the next SIGNED_IN repainted it over a freshly loaded week
+test('signing out answers the open question — it must not outlive the session', () => {
+  const s = html.indexOf('client.auth.onAuthStateChange');
+  assert.ok(s > 0, 'the auth wiring was found in index.html');
+  const live = html.slice(s, html.indexOf('\n  });', s));
+  assert.match(live, /SIGNED_OUT'\)\s*\{\s*settleConfirm\(false\);/,
+    'answered before the phase flips, so no flow is left awaiting a week that has been replaced');
+});
+
 test('the native dialogs are gone from every confirm path', () => {
   assert.doesNotMatch(html, /[^\w]confirm\(/, 'window.confirm has no callers left, dot-qualified or bare');
   assert.doesNotMatch(html, /[^\w]alert\(/, 'alert has no callers left either — the notice does its job');
