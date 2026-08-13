@@ -2041,9 +2041,7 @@ test('the app wears one name — tab, header, gate, noscript and manifest all sa
   const manifestSrc = await readFile(new URL('../manifest.webmanifest', import.meta.url), 'utf8');
   const manifest = JSON.parse(manifestSrc);
   assert.equal(manifest.name, NAME);
-  // short_name exists for the launcher slot that name doesn't fit — Android
-  // truncates around 12 chars, so pinning it equal to the 14-char name
-  // guarantees "The Weekly…" on every home screen
+  // Android truncates launcher labels around 12 chars — the full name doesn't fit
   assert.equal(manifest.short_name, 'Weekly Pot');
   assert.ok(manifest.short_name.length <= 12, 'short_name must survive a launcher label');
   // compare the words as read, not the markup — the accent span may wrap any of them
@@ -2059,9 +2057,9 @@ test('the app wears one name — tab, header, gate, noscript and manifest all sa
   assert.match(words(/<noscript>([\s\S]*?)<\/noscript>/, 'noscript fallback'), new RegExp(`^${NAME}\\b`));
   // the debug seam is a name surface too — the only place a script addresses the app
   assert.match(html, /window\.__weeklypot = \{/, 'the debug seam wears the new name');
-  // separators optional, so the concatenated identifier spelling (mealshop) is
-  // caught too — the first guard here waved that one through
-  const oldName = /meal[\s_-]*(?:&amp;|&|and\b)?[\s_-]*shop/i;
+  // separators optional so identifier spellings (mealshop, meal_and_shop) match;
+  // the \b keeps innocent copy like "meal shopping" out
+  const oldName = /meal[\s_-]*(?:&amp;|&|and)?[\s_-]*shop\b/i;
   assert.doesNotMatch(html, oldName, 'no half-renamed copy left in the page');
   assert.doesNotMatch(manifestSrc, oldName, 'nor in the manifest');
 });
