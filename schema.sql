@@ -1,4 +1,4 @@
--- Weekly Meal & Shop — Supabase schema
+-- The Weekly Pot — Supabase schema
 -- Run once: Dashboard → SQL Editor → paste this whole file → Run.
 
 -- Meals and breakfasts: your library

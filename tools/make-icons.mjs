@@ -1,4 +1,4 @@
-// Hand-encoded PNG icons for Meal & Shop — plate on the board blue.
+// Hand-encoded PNG icons for The Weekly Pot — plate on the board blue.
 // Zero-dep: node zlib deflate + hand-rolled CRC32. Regenerate: node tools/make-icons.mjs icons
 import { deflateSync } from 'node:zlib';
 import { writeFileSync, mkdirSync } from 'node:fs';

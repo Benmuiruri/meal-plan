@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#1B5B9E">
 <meta name="color-scheme" content="light">
-<title>Meal &amp; Shop</title>
+<title>The Weekly Pot</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🍲</text></svg>">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icons/icon-180.png">
@@ -89,7 +89,7 @@ h2.screen-title {
   font-family: var(--display);
   font-size: 20px; letter-spacing: 0.06em;
 }
-.brand .amp { color: var(--mustard); }
+.brand .accent { color: var(--mustard); }
 .save-state { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: var(--chalk-dim); }
 .save-state .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--leaf); }
 .save-state[data-status="saving"] .dot { background: var(--mustard); }
@@ -144,7 +144,7 @@ h2.screen-title {
   font-size: 44px; letter-spacing: 0.04em; text-transform: uppercase;
   text-align: center; line-height: 1.05;
 }
-.gate .board-title .amp { color: var(--mustard); }
+.gate .board-title .accent { color: var(--mustard); }
 .gate .tagline { color: var(--chalk-dim); margin: 10px 0 28px; font-size: 15px; text-align: center; }
 .gate-card {
   background: var(--chalk); border-radius: var(--radius);
@@ -461,7 +461,7 @@ input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; marg
 </head>
 <body>
 <div id="app"></div>
-<noscript><p style="padding:24px;font-family:sans-serif">Meal &amp; Shop needs JavaScript turned on.</p></noscript>
+<noscript><p style="padding:24px;font-family:sans-serif">The Weekly Pot needs JavaScript turned on.</p></noscript>
 
 <script type="module">
 /* ================================================================
@@ -1150,7 +1150,7 @@ function viewHeader() {
     : state.saveStatus === 'error' ? 'Not saved' : 'Saved';
   return `
     <header class="header">
-      <span class="brand">MEAL <span class="amp">&amp;</span> SHOP</span>
+      <span class="brand">THE WEEKLY <span class="accent">POT</span></span>
       <span id="save-state" class="save-state" data-status="${state.saveStatus}">
         <span class="dot"></span><span class="label">${label}</span>
       </span>
@@ -1186,7 +1186,7 @@ function viewTabbar() {
 function viewGate(inner) {
   return `
     <div class="gate">
-      <div class="board-title">Meal <span class="amp">&amp;</span> Shop</div>
+      <div class="board-title">The Weekly <span class="accent">Pot</span></div>
       <p class="tagline">One week. One board. One list.</p>
       <div class="gate-card">${inner}</div>
     </div>`;

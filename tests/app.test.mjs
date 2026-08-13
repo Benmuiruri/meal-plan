@@ -2036,6 +2036,28 @@ test('the manifest is standalone, relative-scoped, and every icon it names is a 
   assert.equal(apple.readUInt32BE(16), 180);
 });
 
+test('the app wears one name — tab, header, gate, noscript and manifest all say it', async () => {
+  const NAME = 'The Weekly Pot';
+  const manifestSrc = await readFile(new URL('../manifest.webmanifest', import.meta.url), 'utf8');
+  const manifest = JSON.parse(manifestSrc);
+  assert.equal(manifest.name, NAME);
+  assert.equal(manifest.short_name, NAME);
+  // compare the words as read, not the markup — the accent span may wrap any of them
+  const words = (re, label) => {
+    const m = re.exec(html);
+    assert.ok(m, `${label} found in index.html`);
+    return m[1].replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
+  };
+  assert.equal(words(/<title>([\s\S]*?)<\/title>/, 'document title'), NAME);
+  assert.equal(words(/<span class="brand">([\s\S]*?)<\/span>\s*<span id="save-state"/, 'header brand').toLowerCase(),
+    NAME.toLowerCase());
+  assert.equal(words(/<div class="board-title">([\s\S]*?)<\/div>/, 'gate title').toLowerCase(), NAME.toLowerCase());
+  assert.match(words(/<noscript>([\s\S]*?)<\/noscript>/, 'noscript fallback'), new RegExp(`^${NAME}\\b`));
+  const oldName = /Meal\s*(?:&amp;|&)\s*Shop/i;
+  assert.doesNotMatch(html, oldName, 'no half-renamed copy left in the page');
+  assert.doesNotMatch(manifestSrc, oldName, 'nor in the manifest');
+});
+
 test('the committed icons are pixel-identical to what tools/make-icons.mjs draws', async () => {
   const { renderIcon } = await import('../tools/make-icons.mjs');
   // compare decompressed scanlines, not files — deflate output may drift

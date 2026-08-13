@@ -1,4 +1,4 @@
-# Weekly Meal & Shop — Execution Plan
+# The Weekly Pot — Execution Plan
 
 *Revision 2 — Supabase required from the start*
 
