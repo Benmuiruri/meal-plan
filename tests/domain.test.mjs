@@ -13,12 +13,12 @@ assert.ok(start > 0 && dataLayerBanner > start, 'section markers found in index.
 const src = html.slice(start, dataLayerBanner) + `
 export { DAY_KEYS, PICK_TARGET, SEED_MAINS, SEED_BREAKFASTS, parseMoney,
          currentMonday, addDays, nextDraftStart, currentRoute, picksComplete,
-         reconcileDays, swapSlots, lunchFor, computeTotals, budgetTone };`;
+         menuReady, reconcileDays, swapSlots, lunchFor, computeTotals, budgetTone };`;
 
 const {
   DAY_KEYS, PICK_TARGET, SEED_MAINS, SEED_BREAKFASTS, parseMoney,
   currentMonday, addDays, nextDraftStart, currentRoute, picksComplete,
-  reconcileDays, swapSlots, lunchFor, computeTotals, budgetTone,
+  menuReady, reconcileDays, swapSlots, lunchFor, computeTotals, budgetTone,
 } = await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(src));
 
 const week = (over = {}) => ({
@@ -46,6 +46,16 @@ test('picksComplete requires exactly 7 of each', () => {
   const ids = (n, p) => Array.from({ length: n }, (_, i) => p + i);
   assert.equal(picksComplete(week({ picks: { mains: ids(7, 'm'), breakfasts: ids(7, 'b') } })), true);
   assert.equal(picksComplete(week({ picks: { mains: ids(6, 'm'), breakfasts: ids(7, 'b') } })), false);
+});
+
+test('menuReady: 7/7 opens the menu by itself, fewer picks need the confirmed flag', () => {
+  const ids = (n, p) => Array.from({ length: n }, (_, i) => p + i);
+  assert.equal(menuReady(week({ picks: { mains: ids(7, 'm'), breakfasts: ids(7, 'b') } })), true);
+  assert.equal(menuReady(week({ picks: { mains: ids(4, 'm'), breakfasts: ids(7, 'b') } })), false);
+  assert.equal(menuReady(week({ picks: { mains: ids(4, 'm'), breakfasts: ids(7, 'b'), confirmed: true } })), true);
+  assert.equal(menuReady(week({ picks: { mains: [], breakfasts: [], confirmed: true } })), true);
+  // truthy is not confirmed — only an explicit true survives a round-trip through JSONB
+  assert.equal(menuReady(week({ picks: { mains: [], breakfasts: [], confirmed: 'yes' } })), false);
 });
 
 test('reconcileDays fills empty days from picks in order', () => {

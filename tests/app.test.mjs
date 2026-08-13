@@ -564,6 +564,49 @@ test('the locked menu lists what is already picked, in pick order, names escaped
     'an empty category shows no heading over nothing');
 });
 
+test('the locked menu offers Save menu once something is picked; a confirmed menu opens the board', async () => {
+  const domStart = html.indexOf('const DAY_KEYS');
+  const domEnd = html.lastIndexOf('/* =', html.indexOf('5. DATA LAYER'));
+  const wkStart = html.indexOf('function viewWeek');
+  const wkEnd = html.indexOf('/* ---------- Budget');
+  assert.ok(domStart > 0 && domEnd > domStart, 'domain slice markers found in index.html');
+  assert.ok(wkStart > 0 && wkEnd > wkStart, 'viewWeek markers found in index.html');
+  const mod = await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(`
+    ${html.slice(domStart, domEnd)}
+    const state = { lifted: null, week: { picks: { mains: ['m1'], breakfasts: [] }, days: {} } };
+    const mealName = (id) => id ? 'MEAL-' + id : '—';
+    ${html.slice(wkStart, wkEnd)}
+    export { viewWeek, state };`));
+  // one pick is enough for the offer
+  let out = mod.viewWeek();
+  assert.match(out, /week-locked/);
+  assert.match(out, /data-action="save-menu"/, 'a partial week can be declared done');
+  // nothing picked — nothing to build
+  mod.state.week.picks = { mains: [], breakfasts: [] };
+  assert.doesNotMatch(mod.viewWeek(), /data-action="save-menu"/, 'an empty week offers nothing to save');
+  // confirmed: the board opens with the picks it has, empty slots stay open
+  mod.state.week.picks = { mains: ['m1'], breakfasts: ['b1'], confirmed: true };
+  mod.state.week.days = { mon: { breakfast: 'b1', dinner: 'm1' } };
+  out = mod.viewWeek();
+  assert.doesNotMatch(out, /week-locked/, 'the confirmed menu is not locked');
+  assert.match(out, /This week's menu/);
+  assert.match(out, /MEAL-m1/);
+  assert.match(out, /<span class="meal">—<\/span>/, 'an unfilled slot renders open, not broken');
+});
+
+test('the save-menu action asks first, then flips the flag and schedules a save', () => {
+  const hStart = html.indexOf("'save-menu':");
+  const hEnd = html.indexOf("'open-add':", hStart);
+  assert.ok(hStart > 0 && hEnd > hStart, 'save-menu handler markers found in index.html');
+  const live = html.slice(hStart, hEnd)
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/[^\n]*/g, '');
+  assert.match(live, /if \(!\(await confirmSheet\([\s\S]*?\)\)\) return;/,
+    'committing a partial menu is a question, and no answers change nothing');
+  assert.match(live, /picks\.confirmed = true/);
+  assert.match(live, /scheduleSave\(\);\s*render\(\);/, 'the flag rides the normal save pipeline');
+});
+
 test('the lunch change glue trims typed text and deletes the override when emptied', () => {
   const hStart = html.indexOf("if (el.dataset.change === 'lunch')");
   const hEnd = html.indexOf("document.addEventListener('submit'");
@@ -1158,6 +1201,13 @@ test('the summary offers Save this week only once the menu is complete', () => {
   assert.match(viewsMod.viewSummary(), /data-action="save-week"/);
   viewsMod.vstate.week = fullWeek({ status: 'draft', picks: { mains: [], breakfasts: [] } });
   assert.doesNotMatch(viewsMod.viewSummary(), /data-action="save-week"/, 'a barely-started week cannot be frozen');
+});
+
+test('a confirmed partial menu unlocks the summary board and its save button', () => {
+  viewsMod.vstate.week = fullWeek({ status: 'draft', picks: { mains: ['m1'], breakfasts: [], confirmed: true } });
+  const out = viewsMod.viewSummary();
+  assert.match(out, /sum-board/, 'the board builds from what was picked');
+  assert.match(out, /data-action="save-week"/, 'a confirmed partial week can be saved');
 });
 
 test('the summary grocery list is numbered, not a checklist', () => {

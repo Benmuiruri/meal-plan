@@ -355,6 +355,8 @@ button.slot:active { background: rgba(251,246,234,0.12); }
 .week-locked .picked-title { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--chalk-dim); margin-bottom: 4px; }
 .week-locked .picked-names { margin: 0; padding-left: 26px; font-size: 14px; line-height: 1.7; }
 .week-locked .picked-names li::marker { font-family: var(--mono); color: var(--chalk-dim); }
+.week-locked .save-menu-btn { margin-top: 24px; }
+.week-locked .save-menu-hint { color: var(--chalk-dim); font-size: 13px; margin-top: 10px; }
 
 /* ================================================================
    7. BUDGET
@@ -653,6 +655,13 @@ async function resizeImage(file) {
 function picksComplete(week) {
   return week.picks.mains.length === PICK_TARGET
       && week.picks.breakfasts.length === PICK_TARGET;
+}
+
+// A menu is ready to show and save at 7/7, or earlier once the user has said
+// "this is enough — the empty days are leftovers" (picks.confirmed rides the
+// picks JSONB, so it persists without a schema change).
+function menuReady(week) {
+  return picksComplete(week) || week.picks.confirmed === true;
 }
 
 // Drop unpicked meals, dedupe, backfill from picks in order. Lunch overrides
@@ -1347,7 +1356,7 @@ function viewConfirmSheet() {
 
 function viewWeek() {
   const w = state.week;
-  if (!picksComplete(w)) {
+  if (!menuReady(w)) {
     const pickedBlock = (title, ids) => !ids.length ? '' : `
       <div class="picked-block">
         <p class="picked-title">${title}</p>
@@ -1360,6 +1369,11 @@ function viewWeek() {
           <p class="counts money">Mains ${w.picks.mains.length}/7 · Breakfasts ${w.picks.breakfasts.length}/7</p>
           ${pickedBlock('Mains', w.picks.mains)}
           ${pickedBlock('Breakfasts', w.picks.breakfasts)}
+          ${w.picks.mains.length + w.picks.breakfasts.length > 0 ? `
+            <button type="button" class="btn-primary save-menu-btn" data-action="save-menu">
+              Save menu
+            </button>
+            <p class="save-menu-hint">Days without a meal stay open for leftovers.</p>` : ''}
         </div>
       </div>`;
   }
@@ -1508,7 +1522,7 @@ function viewGroceryRows(groceries) {
 
 function viewSummary() {
   const w = state.week;
-  const hasWeek = picksComplete(w);
+  const hasWeek = menuReady(w);
   return `
     <div class="screen">
       <h2 class="screen-title">Summary</h2>
@@ -1695,6 +1709,18 @@ const actions = {
   },
 
   'clear-picks': () => { clearPicks(state.pickTab); },
+
+  'save-menu': async () => {
+    const { mains, breakfasts } = state.week.picks;
+    if (!(await confirmSheet({
+      title: 'Save the menu?',
+      body: `${mains.length} main${mains.length === 1 ? '' : 's'} and ${breakfasts.length} breakfast${breakfasts.length === 1 ? '' : 's'} so far — days without a meal stay open for leftovers.`,
+      confirmLabel: 'Save menu',
+    }))) return;
+    state.week.picks.confirmed = true;
+    scheduleSave();
+    render();
+  },
 
   'open-add': () => {
     state.addOpen = true;
