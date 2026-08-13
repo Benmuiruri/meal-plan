@@ -515,6 +515,7 @@ test('the menu board renders every lunch as an input: override escaped into valu
   const domEnd = html.lastIndexOf('/* =', html.indexOf('5. DATA LAYER'));
   const wkStart = html.indexOf('function viewWeek');
   const wkEnd = html.indexOf('/* ---------- Budget');
+  assert.ok(domStart > 0 && domEnd > domStart, 'domain slice markers found in index.html');
   assert.ok(wkStart > 0 && wkEnd > wkStart, 'viewWeek markers found in index.html');
   const ids = (n, p) => Array.from({ length: n }, (_, i) => p + i);
   const days = {};
@@ -543,6 +544,7 @@ test('the locked menu lists what is already picked, in pick order, names escaped
   const domEnd = html.lastIndexOf('/* =', html.indexOf('5. DATA LAYER'));
   const wkStart = html.indexOf('function viewWeek');
   const wkEnd = html.indexOf('/* ---------- Budget');
+  assert.ok(domStart > 0 && domEnd > domStart, 'domain slice markers found in index.html');
   assert.ok(wkStart > 0 && wkEnd > wkStart, 'viewWeek markers found in index.html');
   const mod = await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(`
     ${html.slice(domStart, domEnd)}
@@ -1129,6 +1131,7 @@ const viewsEnd = html.indexOf('/* ---------- root');
 assert.ok(viewsStart > 0 && viewsEnd > viewsStart, 'summary/history view markers found in index.html');
 const domStart = html.indexOf('const DAY_KEYS');
 const domEnd = html.lastIndexOf('/* =', html.indexOf('5. DATA LAYER'));
+assert.ok(domStart > 0 && domEnd > domStart, 'domain slice markers found in index.html');
 const viewsMod = await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(`
   ${html.slice(domStart, domEnd)}
   const state = { week: null, history: null, historyError: '', historyDetail: null };
