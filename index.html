@@ -351,6 +351,10 @@ button.slot:active { background: rgba(251,246,234,0.12); }
 }
 .week-locked .big { font-family: var(--display); font-size: 22px; text-transform: uppercase; letter-spacing: 0.04em; line-height: 1.3; margin-bottom: 12px; }
 .week-locked .counts { font-family: var(--mono); color: var(--mustard); font-size: 15px; }
+.week-locked .picked-block { margin: 20px auto 0; max-width: 320px; text-align: left; }
+.week-locked .picked-title { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--chalk-dim); margin-bottom: 4px; }
+.week-locked .picked-names { margin: 0; padding-left: 26px; font-size: 14px; line-height: 1.7; }
+.week-locked .picked-names li::marker { font-family: var(--mono); color: var(--chalk-dim); }
 
 /* ================================================================
    7. BUDGET
@@ -1344,11 +1348,18 @@ function viewConfirmSheet() {
 function viewWeek() {
   const w = state.week;
   if (!picksComplete(w)) {
+    const pickedBlock = (title, ids) => !ids.length ? '' : `
+      <div class="picked-block">
+        <p class="picked-title">${title}</p>
+        <ol class="picked-names">${ids.map((id) => `<li>${esc(mealName(id))}</li>`).join('')}</ol>
+      </div>`;
     return `
       <div class="screen">
         <div class="week-locked">
           <p class="big">Choose 7 mains and 7 breakfasts to build your menu.</p>
           <p class="counts money">Mains ${w.picks.mains.length}/7 · Breakfasts ${w.picks.breakfasts.length}/7</p>
+          ${pickedBlock('Mains', w.picks.mains)}
+          ${pickedBlock('Breakfasts', w.picks.breakfasts)}
         </div>
       </div>`;
   }

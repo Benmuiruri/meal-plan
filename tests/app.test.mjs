@@ -538,6 +538,30 @@ test('the menu board renders every lunch as an input: override escaped into valu
   assert.equal(out.match(/data-change="lunch"/g)?.length, 7, 'all seven days are editable');
 });
 
+test('the locked menu lists what is already picked, in pick order, names escaped', async () => {
+  const domStart = html.indexOf('const DAY_KEYS');
+  const domEnd = html.lastIndexOf('/* =', html.indexOf('5. DATA LAYER'));
+  const wkStart = html.indexOf('function viewWeek');
+  const wkEnd = html.indexOf('/* ---------- Budget');
+  assert.ok(wkStart > 0 && wkEnd > wkStart, 'viewWeek markers found in index.html');
+  const mod = await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(`
+    ${html.slice(domStart, domEnd)}
+    const state = { lifted: null, week: {
+      picks: { mains: ['m2', 'm1'], breakfasts: [] }, days: {},
+    } };
+    const mealName = (id) => id === 'm1' ? '<b>Hot & Sour</b>' : 'MEAL-' + id;
+    ${html.slice(wkStart, wkEnd)}
+    export { viewWeek };`));
+  const out = mod.viewWeek();
+  assert.match(out, /Mains 2\/7 · Breakfasts 0\/7/, 'the counts stay');
+  // pick order preserved: m2 was picked first, so it leads the list
+  assert.match(out, /<li>MEAL-m2<\/li>\s*<li>&lt;b&gt;Hot &amp; Sour&lt;\/b&gt;<\/li>/,
+    'names appear in pick order AND html-escaped');
+  assert.match(out, /<p class="picked-title">Mains<\/p>/);
+  assert.doesNotMatch(out, /<p class="picked-title">Breakfasts<\/p>/,
+    'an empty category shows no heading over nothing');
+});
+
 test('the lunch change glue trims typed text and deletes the override when emptied', () => {
   const hStart = html.indexOf("if (el.dataset.change === 'lunch')");
   const hEnd = html.indexOf("document.addEventListener('submit'");
