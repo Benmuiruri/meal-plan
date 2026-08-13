@@ -191,6 +191,9 @@ h2.screen-title {
 /* ================================================================
    5. PICK
    ================================================================ */
+.week-pick { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+.week-pick span { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink-dim); }
+.week-pick input { font-family: var(--mono); font-size: 15px; padding: 8px 10px; border: 2px solid var(--ink); border-radius: 10px; background: #fff; }
 .pick-toggle { display: flex; gap: 8px; margin-bottom: 4px; }
 .pick-toggle button {
   flex: 1; padding: 10px;
@@ -589,6 +592,14 @@ function addDays(iso, n) {
   return d.toISOString().slice(0, 10);
 }
 
+// Any date belongs to the week of its Monday — Sunday closes a week, it
+// never opens the next one.
+function mondayOf(iso) {
+  const d = new Date(iso + 'T00:00:00Z');
+  d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7));
+  return d.toISOString().slice(0, 10);
+}
+
 const fmtDate = (iso) => new Date(iso + 'T00:00:00Z')
   .toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' });
 
@@ -776,13 +787,18 @@ const db = {
     return data;
   },
 
-  // The newest row wins: a draft is resumed no matter how stale (saving is
-  // the user's ritual, not the calendar's); a saved one starts the next draft.
+  // The draft wins wherever it sits: the week picker can repoint it BEHIND a
+  // saved week, so "the newest row" is not "the draft". No draft at all — the
+  // newest saved week anchors the next one.
   async loadActiveWeek(userId, todayMonday) {
+    const draft = await this.client.from('weeks').select('*')
+      .eq('status', 'draft')
+      .order('week_start', { ascending: false }).limit(1).maybeSingle();
+    if (draft.error) throw draft.error;
+    if (draft.data) return draft.data;
     const latest = await this.client.from('weeks').select('*')
       .order('week_start', { ascending: false }).limit(1).maybeSingle();
     if (latest.error) throw latest.error;
-    if (latest.data && latest.data.status === 'draft') return latest.data;
     const start = latest.data ? nextDraftStart(latest.data.week_start, todayMonday) : todayMonday;
     const created = await this.client.from('weeks')
       .insert({ user_id: userId, week_start: start }).select().single();
@@ -819,6 +835,7 @@ const db = {
 
   async saveWeek(week) {
     const payload = {
+      week_start: week.week_start, // the picker can repoint a draft
       budget: week.budget,
       picks: week.picks,
       days: week.days,
@@ -1012,6 +1029,43 @@ async function clearPicks(tab) {
   scheduleSave();
   render();
   return true;
+}
+
+// Repoint the draft to another Monday (any picked date snaps to its week's).
+// A Monday already saved in History refuses — delete the record there first.
+let weekPickInFlight = false;
+async function changeWeekStart(raw) {
+  if (weekPickInFlight) return null;
+  const week = state.week;
+  if (!raw) { render(); return null; } // a cleared field restores the real value
+  const monday = mondayOf(raw);
+  if (monday === week.week_start) { render(); return null; }
+  weekPickInFlight = true;
+  try {
+    // the saved-week lookup reuses the History cache and seeds it in return
+    const saved = state.history ?? await withCeiling(db.listSavedWeeks());
+    if (state.week !== week) return null; // the week moved on mid-lookup
+    state.history = saved;
+    if (saved.some((s) => s.week_start === monday)) {
+      noticeSheet({
+        title: 'That week is already saved',
+        body: `The week of ${fmtDate(monday)} is in History — delete it there first, then pick it again.`,
+      });
+      return false;
+    }
+    week.week_start = monday;
+    scheduleSave();
+    render();
+    return true;
+  } catch {
+    noticeSheet({
+      title: "Can't check that week",
+      body: 'Saved weeks could not be looked up — check your connection and try again.',
+    });
+    return null;
+  } finally {
+    weekPickInFlight = false;
+  }
 }
 
 // Volatile flag: a failed card photo degrades to the tinted tile. Cleared
@@ -1252,6 +1306,11 @@ function viewPick() {
   const archived = state.meals.filter((m) => m.kind === kind && m.archived && !picked.includes(m.id));
   return `
     <div class="screen">
+      <label class="week-pick">
+        <span>Menu for week of</span>
+        <input type="date" data-change="week-start" value="${esc(state.week.week_start)}"
+               aria-label="The Monday this menu is for">
+      </label>
       <div class="pick-toggle" role="tablist">
         <button type="button" data-action="pick-tab" data-tab="mains" class="${state.pickTab === 'mains' ? 'is-active' : ''}">Mains</button>
         <button type="button" data-action="pick-tab" data-tab="breakfasts" class="${state.pickTab === 'breakfasts' ? 'is-active' : ''}">Breakfasts</button>
@@ -2050,6 +2109,8 @@ document.addEventListener('change', (e) => {
     else delete day.lunch;
     scheduleSave();
   }
+
+  if (el.dataset.change === 'week-start') changeWeekStart(el.value);
 
 });
 

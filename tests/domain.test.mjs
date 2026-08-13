@@ -12,12 +12,12 @@ assert.ok(start > 0 && dataLayerBanner > start, 'section markers found in index.
 
 const src = html.slice(start, dataLayerBanner) + `
 export { DAY_KEYS, PICK_TARGET, SEED_MAINS, SEED_BREAKFASTS, parseMoney,
-         currentMonday, addDays, nextDraftStart, currentRoute, picksComplete,
+         currentMonday, mondayOf, addDays, nextDraftStart, currentRoute, picksComplete,
          menuReady, reconcileDays, swapSlots, lunchFor, computeTotals, budgetTone };`;
 
 const {
   DAY_KEYS, PICK_TARGET, SEED_MAINS, SEED_BREAKFASTS, parseMoney,
-  currentMonday, addDays, nextDraftStart, currentRoute, picksComplete,
+  currentMonday, mondayOf, addDays, nextDraftStart, currentRoute, picksComplete,
   menuReady, reconcileDays, swapSlots, lunchFor, computeTotals, budgetTone,
 } = await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(src));
 
@@ -40,6 +40,14 @@ test('currentMonday returns an ISO date that is a Monday', () => {
   const iso = currentMonday();
   assert.match(iso, /^\d{4}-\d{2}-\d{2}$/);
   assert.equal(new Date(iso).getUTCDay(), 1);
+});
+
+test('mondayOf snaps any date to its week\'s Monday', () => {
+  assert.equal(mondayOf('2026-08-10'), '2026-08-10'); // a Monday keeps itself
+  assert.equal(mondayOf('2026-08-12'), '2026-08-10'); // midweek snaps back
+  assert.equal(mondayOf('2026-08-16'), '2026-08-10'); // Sunday closes the week, it never opens the next
+  assert.equal(mondayOf('2026-09-01'), '2026-08-31'); // month boundary
+  assert.equal(mondayOf('2027-01-01'), '2026-12-28'); // year boundary
 });
 
 test('picksComplete requires exactly 7 of each', () => {

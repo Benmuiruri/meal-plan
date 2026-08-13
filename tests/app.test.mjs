@@ -37,12 +37,12 @@ function viewSaveErrorBanner() { const k = state.saveErrorPermanent ? 'permanent
 export { state, db, scheduleSave, flushSave, signIn, resizeImage, isServerRejection,
          markDeadImage, reviveDeadImages, performSaveWeek, withCeiling, MEAL_REQUEST_CEILING_MS,
          confirmSheet, settleConfirm, noticeSheet, togglePasswordField, isPasswordToggle,
-         clearPicks };`;
+         clearPicks, changeWeekStart };`;
 
 const { state, db, scheduleSave, flushSave, signIn, resizeImage, isServerRejection,
         markDeadImage, reviveDeadImages, performSaveWeek, withCeiling, MEAL_REQUEST_CEILING_MS,
         confirmSheet, settleConfirm, noticeSheet, togglePasswordField, isPasswordToggle,
-        clearPicks } =
+        clearPicks, changeWeekStart } =
   await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(src));
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -889,7 +889,7 @@ test('the image-error and online wiring: capture phase, and recovery on connecti
 // ── save-the-week & history ────────────────────────────────────────────
 // fake for every weeks-table path performSaveWeek exercises; `log` records
 // the operation order
-function fakeWeeksReader({ latest = null, saved = [], failWith = null, failSelect = false,
+function fakeWeeksReader({ latest = null, draft = null, saved = [], failWith = null, failSelect = false,
                            failStatusUpdate = false, flipZeroRows = false, delayMs = 0, hang = 0 } = {}) {
   const inserts = [];
   const filters = [];
@@ -903,11 +903,11 @@ function fakeWeeksReader({ latest = null, saved = [], failWith = null, failSelec
     // completes any requests parked by `hang`, so a test can drain its own timers
     release: () => hung.splice(0).forEach((f) => f()),
     from() {
-      const q = { op: 'select', payload: null, statusEq: false };
+      const q = { op: 'select', statusVal: null };
       const b = {
         select: () => b, maybeSingle: () => b, single: () => b,
         limit: (n) => { filters.push(['limit', n]); return b; },
-        eq: (col, val) => { if (col === 'status') q.statusEq = true; filters.push(['eq', col, val]); return b; },
+        eq: (col, val) => { if (col === 'status') q.statusVal = val; filters.push(['eq', col, val]); return b; },
         order: (col, opts) => { filters.push(['order', col, opts?.ascending]); return b; },
         insert(payload) { q.op = 'insert'; inserts.push(payload); return b; },
         update(payload) { q.op = 'update'; q.payload = payload; return b; },
@@ -929,7 +929,8 @@ function fakeWeeksReader({ latest = null, saved = [], failWith = null, failSelec
             return resolve({ data: { id: 'new-week', status: 'draft', ...inserts[inserts.length - 1] }, error: null });
           }
           if (failSelect) return resolve({ data: null, error: { message: 'select refused' } });
-          resolve({ data: q.statusEq ? saved : latest, error: null });
+          // status=draft is the loader's resume query, status=saved is history
+          resolve({ data: q.statusVal === 'draft' ? draft : q.statusVal === 'saved' ? saved : latest, error: null });
         },
       };
       return b;
@@ -939,11 +940,19 @@ function fakeWeeksReader({ latest = null, saved = [], failWith = null, failSelec
 
 test('loadActiveWeek resumes the newest draft no matter how stale', async () => {
   const draft = { id: 'w9', status: 'draft', week_start: '2026-06-01' };
-  db.client = fakeWeeksReader({ latest: draft });
+  db.client = fakeWeeksReader({ draft });
   assert.equal(await db.loadActiveWeek('u1', '2026-08-03'), draft);
   assert.equal(db.client.inserts.length, 0, 'an old draft is resumed, never replaced');
-  // "the newest row" is a query shape, not an accident of the fake
-  assert.deepEqual(db.client.filters, [['order', 'week_start', false], ['limit', 1]]);
+  // "the newest draft" is a query shape, not an accident of the fake
+  assert.deepEqual(db.client.filters, [['eq', 'status', 'draft'], ['order', 'week_start', false], ['limit', 1]]);
+});
+
+test('loadActiveWeek resumes a draft repointed BEHIND a saved week — the newest row is not the draft', async () => {
+  const draft = { id: 'w9', status: 'draft', week_start: '2026-08-03' };
+  db.client = fakeWeeksReader({ draft, latest: { id: 'w1', status: 'saved', week_start: '2026-08-10' } });
+  assert.equal(await db.loadActiveWeek('u1', '2026-08-10'), draft,
+    'a draft older than a saved week must not be stranded by a newest-row query');
+  assert.equal(db.client.inserts.length, 0, 'no replacement draft is minted over it');
 });
 
 test('loadActiveWeek after a mid-week save starts the following Monday', async () => {
@@ -963,6 +972,16 @@ test('loadActiveWeek with no weeks at all starts the current Monday', async () =
   db.client = fakeWeeksReader({ latest: null });
   await db.loadActiveWeek('u1', '2026-08-03');
   assert.deepEqual(db.client.inserts, [{ user_id: 'u1', week_start: '2026-08-03' }]);
+});
+
+test('a flushed save carries the week identity — a repointed Monday persists', async () => {
+  db.client = fakeWeeksClient();
+  state.week.week_start = '2026-07-27';
+  scheduleSave();
+  await flushSave();
+  const up = db.client.ops('update').find((c) => !c.payload.status);
+  assert.equal(up.payload.week_start, '2026-07-27',
+    'without week_start in the payload, repointing evaporates on the next flush');
 });
 
 test('markWeekSaved flips exactly the status, and flags a vanished row as a known condition', async () => {
@@ -986,7 +1005,8 @@ test('performSaveWeek runs flush, status flip, next draft — in that order', as
   state.history = [{ id: 'stale' }];
   db.client = fakeWeeksReader({ latest: { id: 'w1', status: 'saved', week_start: '2026-08-03' } });
   assert.equal((await performSaveWeek('2026-08-03')).outcome, 'done');
-  assert.deepEqual(db.client.log, ['flush-week', 'flip-status', 'select', 'insert'],
+  // two selects: the draft probe (empty — it was just flipped), then the anchor
+  assert.deepEqual(db.client.log, ['flush-week', 'flip-status', 'select', 'select', 'insert'],
     'reordering the flow is a different flow');
   assert.equal(state.week.week_start, '2026-08-10'); // computed by nextDraftStart, not the fake
   assert.equal(state.week.id, 'new-week');
@@ -1056,10 +1076,10 @@ test('after a vanished row, a retry restores it via the flush self-heal and then
   let flips = 0;
   const log = [];
   db.client = { from() {
-    const q = { op: 'select', payload: null, opts: null };
+    const q = { op: 'select', payload: null, opts: null, statusVal: null };
     const b = {
       select: () => b, maybeSingle: () => b, single: () => b, limit: () => b,
-      order: () => b, eq: () => b,
+      order: () => b, eq: (col, val) => { if (col === 'status') q.statusVal = val; return b; },
       insert: (p) => { q.op = 'insert'; q.payload = p; return b; },
       update: (p) => { q.op = 'update'; q.payload = p; return b; },
       upsert: (p, o) => { q.op = 'upsert'; q.payload = p; q.opts = o; return b; },
@@ -1074,7 +1094,10 @@ test('after a vanished row, a retry restores it via the flush self-heal and then
         if (q.op === 'update') return void resolve({ data: exists ? [{ id: state.week.id }] : [], error: null });
         if (q.op === 'upsert') { exists = true; return void resolve({ data: { id: 'w-restored' }, error: null }); }
         if (q.op === 'insert') return void resolve({ data: { id: 'w-next', status: 'draft', ...q.payload }, error: null });
-        return void resolve({ data: { id: 'w-restored', status: 'saved', week_start: state.week.week_start }, error: null });
+        // the draft probe finds nothing (the row was just flipped); the
+        // anchor select sees the restored saved row
+        return void resolve({ data: q.statusVal === 'draft' ? null
+          : { id: 'w-restored', status: 'saved', week_start: state.week.week_start }, error: null });
       },
     };
     return b;
@@ -1516,6 +1539,84 @@ test('an 8th pick asks nothing and saves nothing — it gets a notice and stops'
   assert.match(tp, /noticeSheet\(\{[\s\S]{0,140}?PICK_TARGET[\s\S]{0,140}?\}\);\s*return;/,
     'the full-board branch shows the notice and exits before any reconcile or save');
   assert.doesNotMatch(tp, /bump/, 'the counter bump is gone — the notice replaced it');
+});
+
+// ── the week picker: any date → its Monday, saved weeks refuse ─────────
+test('changeWeekStart snaps to the Monday and repoints the draft', async () => {
+  state.history = [];                        // History visited, nothing saved
+  const p = changeWeekStart('2026-07-29');   // a Wednesday
+  assert.equal(await p, true);
+  assert.equal(state.week.week_start, '2026-07-27');
+  assert.equal(state.saveStatus, 'saving', 'the repointed week is on its way to the server');
+  db.client = fakeWeeksClient();
+  await flushSave();                         // disarm the debounce this test armed
+});
+
+test('changeWeekStart refuses a Monday that already holds a saved week', async () => {
+  state.history = [{ id: 'w8', week_start: '2026-07-27', status: 'saved' }];
+  assert.equal(await changeWeekStart('2026-07-28'), false);
+  assert.equal(state.week.week_start, '2026-08-03', 'the draft keeps its week');
+  assert.ok(state.confirm?.notice, 'the refusal explains itself');
+  assert.match(state.confirm.body, /History/, 'and points at where the saved week lives');
+  settleConfirm(true);
+  assert.equal(state.saveStatus, 'saved', 'a refused repoint arms no save');
+});
+
+test('changeWeekStart fetches saved weeks when History was never visited, and caches them', async () => {
+  state.history = null;
+  db.client = fakeWeeksReader({ saved: [{ id: 'w8', week_start: '2026-07-27', status: 'saved' }] });
+  assert.equal(await changeWeekStart('2026-07-27'), false);
+  assert.equal(state.week.week_start, '2026-08-03');
+  assert.deepEqual(state.history.map((w) => w.week_start), ['2026-07-27'], 'the lookup seeds the history cache');
+  settleConfirm(true);
+});
+
+test('changeWeekStart on a failed lookup changes nothing and says so', async () => {
+  state.history = null;
+  db.client = fakeWeeksReader({ failSelect: true });
+  assert.equal(await changeWeekStart('2026-07-27'), null);
+  assert.equal(state.week.week_start, '2026-08-03');
+  assert.equal(state.history, null, 'a failed lookup must not cache an empty history');
+  assert.ok(state.confirm?.notice, 'the failure is surfaced, not swallowed');
+  settleConfirm(true);
+  assert.equal(state.saveStatus, 'saved');
+});
+
+test('changeWeekStart treats the same week and an emptied field as no-ops', async () => {
+  state.history = [];
+  assert.equal(await changeWeekStart('2026-08-05'), null, 'same week, different day — nothing to do');
+  assert.equal(await changeWeekStart(''), null, 'a cleared field restores, never repoints');
+  assert.equal(state.week.week_start, '2026-08-03');
+  assert.equal(state.saveStatus, 'saved', 'no-ops arm no save');
+});
+
+test('the change wiring routes week-start through the tested function', () => {
+  const live = html.slice(html.indexOf("document.addEventListener('change'"),
+                          html.indexOf("document.addEventListener('submit'"))
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/[^\n]*/g, '');
+  assert.match(live, /if \(el\.dataset\.change === 'week-start'\) changeWeekStart\(el\.value\);/);
+});
+
+test('the pick screen offers the week picker, valued at the draft\'s own Monday', async () => {
+  const tmplStart = html.indexOf('function viewPick');
+  const tmplEnd = html.indexOf('function viewAddSheet');
+  assert.ok(tmplStart > 0 && tmplEnd > tmplStart, 'viewPick markers found in index.html');
+  const escStart = html.indexOf('const esc =');
+  const escEnd = html.indexOf('[c]));', escStart);
+  const mod = await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(
+    `const PICK_TARGET = 7;
+     const TINTS = ['#111'];
+     const KIND_FOR_TAB = { mains: 'main', breakfasts: 'breakfast' };
+     const state = { pickTab: 'mains', addOpen: false,
+       week: { week_start: '2026-08-03', picks: { mains: [], breakfasts: [] } },
+       meals: [] };
+     ${html.slice(escStart, escEnd + '[c]));'.length)}
+     ${html.slice(tmplStart, tmplEnd)}
+     export { viewPick };`));
+  const out = mod.viewPick();
+  assert.match(out, /type="date"[^>]*data-change="week-start"[^>]*value="2026-08-03"/,
+    'the picker is a date field carrying the real week');
 });
 
 test('clearing empties the tab the question named and leaves the other alone', async () => {
