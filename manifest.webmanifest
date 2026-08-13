@@ -1,6 +1,6 @@
 {
   "name": "The Weekly Pot",
-  "short_name": "The Weekly Pot",
+  "short_name": "Weekly Pot",
   "description": "One week. One board. One list.",
   "start_url": "./",
   "scope": "./",
