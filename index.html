@@ -1035,17 +1035,22 @@ async function clearPicks(tab) {
 // A Monday already saved in History refuses — delete the record there first.
 let weekPickInFlight = false;
 async function changeWeekStart(raw) {
-  if (weekPickInFlight) return null;
+  if (weekPickInFlight) { render(); return null; } // a swallowed pick still restores the input
   const week = state.week;
-  if (!raw) { render(); return null; } // a cleared field restores the real value
+  // a cleared field — or free text from a degraded date input — restores,
+  // never repoints, and never reaches the date maths
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) { render(); return null; }
   const monday = mondayOf(raw);
   if (monday === week.week_start) { render(); return null; }
   weekPickInFlight = true;
   try {
     // the saved-week lookup reuses the History cache and seeds it in return
     const saved = state.history ?? await withCeiling(db.listSavedWeeks());
-    if (state.week !== week) return null; // the week moved on mid-lookup
+    if (state.week !== week) { render(); return null; } // the week moved on mid-lookup
     state.history = saved;
+    // loadHistory early-returns on a populated cache, so a stale failure
+    // would stay painted over rows this lookup just proved loadable
+    state.historyError = '';
     if (saved.some((s) => s.week_start === monday)) {
       noticeSheet({
         title: 'That week is already saved',

@@ -1564,10 +1564,14 @@ test('changeWeekStart refuses a Monday that already holds a saved week', async (
 
 test('changeWeekStart fetches saved weeks when History was never visited, and caches them', async () => {
   state.history = null;
+  state.historyError = 'stale failure from an earlier visit';
   db.client = fakeWeeksReader({ saved: [{ id: 'w8', week_start: '2026-07-27', status: 'saved' }] });
   assert.equal(await changeWeekStart('2026-07-27'), false);
   assert.equal(state.week.week_start, '2026-08-03');
   assert.deepEqual(state.history.map((w) => w.week_start), ['2026-07-27'], 'the lookup seeds the history cache');
+  // loadHistory early-returns on a populated cache, so a stale error would
+  // stay painted over rows this very lookup proved loadable
+  assert.equal(state.historyError, '', 'a successful lookup clears the stale History failure');
   settleConfirm(true);
 });
 
@@ -1582,12 +1586,24 @@ test('changeWeekStart on a failed lookup changes nothing and says so', async () 
   assert.equal(state.saveStatus, 'saved');
 });
 
-test('changeWeekStart treats the same week and an emptied field as no-ops', async () => {
+test('changeWeekStart treats the same week, an emptied field and free text as no-ops', async () => {
   state.history = [];
   assert.equal(await changeWeekStart('2026-08-05'), null, 'same week, different day — nothing to do');
   assert.equal(await changeWeekStart(''), null, 'a cleared field restores, never repoints');
+  // a degraded type="date" is a plain text field — garbage must not escape
+  // as a RangeError from the date maths
+  assert.equal(await changeWeekStart('next tuesday'), null, 'free text restores, never throws');
   assert.equal(state.week.week_start, '2026-08-03');
+  assert.equal(state.confirm, null, 'no-ops ask nothing');
   assert.equal(state.saveStatus, 'saved', 'no-ops arm no save');
+});
+
+test('every changeWeekStart early exit repaints — the field must never show a Monday the draft lacks', () => {
+  const fn = html.slice(html.indexOf('async function changeWeekStart'), html.indexOf('// Volatile flag'));
+  assert.match(fn, /if \(weekPickInFlight\) \{ render\(\); return null; \}/,
+    'a pick swallowed mid-lookup still restores the input');
+  assert.match(fn, /if \(state\.week !== week\) \{ render\(\); return null; \}/,
+    'the week-swap guard restores the input too');
 });
 
 test('the change wiring routes week-start through the tested function', () => {
