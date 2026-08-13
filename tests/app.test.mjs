@@ -32,17 +32,18 @@ const viewsBanner = html.lastIndexOf('/* =', html.indexOf('8. VIEWS'));
 assert.ok(start > 0 && viewsBanner > start, 'section markers found in index.html');
 
 const src = html.slice(start, viewsBanner) + `
-function render() {}
+const renderLog = { n: 0 };            // observable repaints — some exits' only effect
+function render() { renderLog.n++; }
 function viewSaveErrorBanner() { const k = state.saveErrorPermanent ? 'permanent' : 'transient'; return '<banner data-kind="' + k + '">' + k + '</banner>'; }
 export { state, db, scheduleSave, flushSave, signIn, resizeImage, isServerRejection,
          markDeadImage, reviveDeadImages, performSaveWeek, withCeiling, MEAL_REQUEST_CEILING_MS,
          confirmSheet, settleConfirm, noticeSheet, togglePasswordField, isPasswordToggle,
-         clearPicks, changeWeekStart };`;
+         clearPicks, changeWeekStart, renderLog };`;
 
 const { state, db, scheduleSave, flushSave, signIn, resizeImage, isServerRejection,
         markDeadImage, reviveDeadImages, performSaveWeek, withCeiling, MEAL_REQUEST_CEILING_MS,
         confirmSheet, settleConfirm, noticeSheet, togglePasswordField, isPasswordToggle,
-        clearPicks, changeWeekStart } =
+        clearPicks, changeWeekStart, renderLog } =
   await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(src));
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -1586,24 +1587,39 @@ test('changeWeekStart on a failed lookup changes nothing and says so', async () 
   assert.equal(state.saveStatus, 'saved');
 });
 
-test('changeWeekStart treats the same week, an emptied field and free text as no-ops', async () => {
+test('changeWeekStart treats the same week, an emptied field and garbage as no-ops', async () => {
   state.history = [];
   assert.equal(await changeWeekStart('2026-08-05'), null, 'same week, different day — nothing to do');
   assert.equal(await changeWeekStart(''), null, 'a cleared field restores, never repoints');
-  // a degraded type="date" is a plain text field — garbage must not escape
-  // as a RangeError from the date maths
+  // a degraded type="date" is a plain text field — neither free prose nor a
+  // shape-valid impossible date may escape as a RangeError from the date maths
   assert.equal(await changeWeekStart('next tuesday'), null, 'free text restores, never throws');
+  assert.equal(await changeWeekStart('2026-02-30'), null, 'an impossible date restores, never throws');
+  assert.equal(await changeWeekStart('2026-13-01'), null, 'an impossible month too');
   assert.equal(state.week.week_start, '2026-08-03');
   assert.equal(state.confirm, null, 'no-ops ask nothing');
   assert.equal(state.saveStatus, 'saved', 'no-ops arm no save');
 });
 
-test('every changeWeekStart early exit repaints — the field must never show a Monday the draft lacks', () => {
-  const fn = html.slice(html.indexOf('async function changeWeekStart'), html.indexOf('// Volatile flag'));
-  assert.match(fn, /if \(weekPickInFlight\) \{ render\(\); return null; \}/,
-    'a pick swallowed mid-lookup still restores the input');
-  assert.match(fn, /if \(state\.week !== week\) \{ render\(\); return null; \}/,
-    'the week-swap guard restores the input too');
+test('every changeWeekStart early exit repaints — the field must never show a Monday the draft lacks', async () => {
+  state.history = [];
+  renderLog.n = 0;
+  await changeWeekStart('');            // cleared field
+  await changeWeekStart('next tuesday');// free text
+  await changeWeekStart('2026-02-30');  // impossible date
+  await changeWeekStart('2026-08-05');  // same week
+  assert.equal(renderLog.n, 4, 'each rejected pick repaints the input from state');
+  // the two async guards: a pick swallowed mid-lookup, and the week swapped away
+  state.history = null;
+  db.client = fakeWeeksReader({ saved: [], delayMs: 20 });
+  renderLog.n = 0;
+  const p = changeWeekStart('2026-07-29');
+  assert.equal(await changeWeekStart('2026-07-30'), null, 'a second pick mid-lookup is swallowed');
+  assert.equal(renderLog.n, 1, '…but still repaints');
+  state.week = { ...state.week };       // a resync swapped the draft object mid-lookup
+  assert.equal(await p, null, 'the week moved on — nothing is repointed');
+  assert.equal(renderLog.n, 2, 'and the swap guard repainted too');
+  assert.equal(state.confirm, null);
 });
 
 test('the change wiring routes week-start through the tested function', () => {
