@@ -584,6 +584,9 @@ test('the locked menu offers Save menu once something is picked; a confirmed men
   // nothing picked — nothing to build
   mod.state.week.picks = { mains: [], breakfasts: [] };
   assert.doesNotMatch(mod.viewWeek(), /data-action="save-menu"/, 'an empty week offers nothing to save');
+  // a confirmed week emptied of picks re-locks — the flag alone builds nothing
+  mod.state.week.picks = { mains: [], breakfasts: [], confirmed: true };
+  assert.match(mod.viewWeek(), /week-locked/, 'clearing every pick revokes the confirm');
   // confirmed: the board opens with the picks it has, empty slots stay open
   mod.state.week.picks = { mains: ['m1'], breakfasts: ['b1'], confirmed: true };
   mod.state.week.days = { mon: { breakfast: 'b1', dinner: 'm1' } };

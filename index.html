@@ -659,9 +659,12 @@ function picksComplete(week) {
 
 // A menu is ready to show and save at 7/7, or earlier once the user has said
 // "this is enough — the empty days are leftovers" (picks.confirmed rides the
-// picks JSONB, so it persists without a schema change).
+// picks JSONB, so it persists without a schema change). The confirm only
+// counts while something is still picked: emptied picks re-lock the menu, or
+// Summary would offer to save an all-dash board.
 function menuReady(week) {
-  return picksComplete(week) || week.picks.confirmed === true;
+  const anyPicked = week.picks.mains.length + week.picks.breakfasts.length > 0;
+  return picksComplete(week) || (anyPicked && week.picks.confirmed === true);
 }
 
 // Drop unpicked meals, dedupe, backfill from picks in order. Lunch overrides
@@ -1528,7 +1531,7 @@ function viewSummary() {
       <h2 class="screen-title">Summary</h2>
 
       ${hasWeek ? viewSumBoard(w) : `
-        <p class="empty-note">No menu yet — choose 7 mains and 7 breakfasts on the Choose meals tab.</p>`}
+        <p class="empty-note">No menu yet — pick meals on the Choose meals tab, then save your menu from the Menu tab.</p>`}
 
       <p class="list-title">Grocery list</p>
       ${w.groceries.length === 0

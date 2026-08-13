@@ -53,9 +53,12 @@ test('menuReady: 7/7 opens the menu by itself, fewer picks need the confirmed fl
   assert.equal(menuReady(week({ picks: { mains: ids(7, 'm'), breakfasts: ids(7, 'b') } })), true);
   assert.equal(menuReady(week({ picks: { mains: ids(4, 'm'), breakfasts: ids(7, 'b') } })), false);
   assert.equal(menuReady(week({ picks: { mains: ids(4, 'm'), breakfasts: ids(7, 'b'), confirmed: true } })), true);
-  assert.equal(menuReady(week({ picks: { mains: [], breakfasts: [], confirmed: true } })), true);
+  assert.equal(menuReady(week({ picks: { mains: ['m1'], breakfasts: [], confirmed: true } })), true);
+  // clearing every pick revokes an earlier confirm — an empty week is never
+  // ready, or Summary would offer to save an all-dash board
+  assert.equal(menuReady(week({ picks: { mains: [], breakfasts: [], confirmed: true } })), false);
   // truthy is not confirmed — only an explicit true survives a round-trip through JSONB
-  assert.equal(menuReady(week({ picks: { mains: [], breakfasts: [], confirmed: 'yes' } })), false);
+  assert.equal(menuReady(week({ picks: { mains: ['m1'], breakfasts: [], confirmed: 'yes' } })), false);
 });
 
 test('reconcileDays fills empty days from picks in order', () => {
