@@ -379,6 +379,9 @@ button.slot:active { background: rgba(251,246,234,0.12); }
   padding: 10px 4px; border-bottom: 1px solid var(--line);
 }
 .g-row .g-name { flex: 1; font-weight: 500; font-size: 15px; }
+/* a long-press must reach our timer, not iOS's text selection or callout */
+.g-row[data-staple] { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
+.list-hint { color: var(--ink-dim); font-size: 12px; margin: -4px 0 4px; }
 .g-row input.g-price {
   width: 84px; text-align: right;
   font-family: var(--mono); font-size: 15px;
@@ -404,7 +407,6 @@ input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; marg
 .tick input:focus-visible + .box { outline: 3px solid var(--mustard); }
 .tick input:disabled + .box { opacity: 0.45; }
 
-.g-remove { color: var(--tomato); font-size: 20px; font-weight: 700; width: 26px; flex-shrink: 0; text-align: center; }
 .g-restore { border: 2px solid var(--ink); border-radius: 8px; padding: 5px 12px; font-weight: 700; font-size: 13px; flex-shrink: 0; }
 .g-restore:disabled { opacity: 0.4; }
 
@@ -787,6 +789,19 @@ const db = {
     return data;
   },
 
+  async addStaple(userId, { name, sort_order }) {
+    const { data, error } = await this.client.from('staples')
+      .insert({ user_id: userId, name, sort_order }).select().single();
+    if (error) throw error;
+    return data;
+  },
+
+  // zero matched rows is success, like deleteWeek — the skew re-run stays safe
+  async deleteStaple(stapleId) {
+    const { error } = await this.client.from('staples').delete().eq('id', stapleId);
+    if (error) throw error;
+  },
+
   // The draft wins wherever it sits: the week picker can repoint it BEHIND a
   // saved week, so "the newest row" is not "the draft". No draft at all — the
   // newest saved week anchors the next one.
@@ -967,6 +982,8 @@ const state = {
   saveStatus: 'saved',       // saved | saving | error
   saveErrorPermanent: false, // error subtype: permanent failures get Reload, not Retry
   confirm: null,             // the open question: { title, body, confirmLabel, resolve }
+  itemDraft: null,           // { name, price } typed into Add an item — survives a render mid-save or a failed one
+  stapleSaving: false,       // one staple write at a time — an add and a remove never race
 };
 
 // The native confirm dialog's replacement. Resolves true only from the
@@ -1074,6 +1091,111 @@ async function changeWeekStart(raw) {
   } finally {
     weekPickInFlight = false;
   }
+}
+
+// A timed-out write is abandoned, not cancelled — it may still land. Freeing
+// the sheet would let a second write race it, so the app locks into a resync,
+// which is the only thing that can tell what the server actually holds.
+function lockOnUnknownWrite(err) {
+  if (!err?.timedOut) return false;
+  settleConfirm(false); // the error screen replaces any open question — answer it, don't strand its flow
+  state.editId = null;
+  state.editName = '';
+  state.addOpen = false;
+  state.addName = '';
+  state.phase = 'error';
+  state.errorTitle = "Can't confirm";
+  state.errorMsg = "Couldn't tell whether that change landed — it took too long to answer. Tap Try again to read the truth from Supabase.";
+  render();
+  return true;
+}
+
+// Gone for good, and off this week's list too. Saved weeks keep their own
+// copy of each name and price, so History is untouched.
+async function removeStaple(id) {
+  const staple = state.staples.find((s) => s.id === id);
+  if (!staple || state.stapleSaving) return null;
+  if (!(await confirmSheet({
+    title: `Remove ${staple.name} from your staples?`,
+    body: "It comes off this week's list too. You can add it again any time.",
+    confirmLabel: 'Remove',
+  }))) return false;
+  state.stapleSaving = true;
+  try {
+    await withCeiling(db.deleteStaple(id));
+    state.staples = state.staples.filter((s) => s.id !== id);
+    state.week.groceries = state.week.groceries.filter((g) => g.stapleId !== id);
+    scheduleSave();
+    render();
+    return true;
+  } catch (err) {
+    if (lockOnUnknownWrite(err)) return null;
+    noticeSheet({
+      title: "Couldn't remove it",
+      body: `${staple.name} is still a staple: ${err.message ?? 'no connection'}`,
+    });
+    return null;
+  } finally {
+    state.stapleSaving = false;
+  }
+}
+
+// Shared by Add an item and the load-time conversion: a known name (any case)
+// ticks that staple, a price replaces this week's. Throws if a new staple fails.
+async function tickByName(name, price) {
+  name = name.trim();
+  let staple = state.staples.find((s) => s.name.trim().toLowerCase() === name.toLowerCase());
+  if (!staple) {
+    const sort_order = Math.max(-1, ...state.staples.map((s) => s.sort_order)) + 1;
+    staple = await withCeiling(db.addStaple(state.session.user.id, { name, sort_order }));
+    state.staples.push(staple);
+  }
+  const row = state.week.groceries.find((g) => g.stapleId === staple.id);
+  if (!row) {
+    state.week.groceries.push({
+      id: crypto.randomUUID(), stapleId: staple.id, name: staple.name,
+      price: price ?? staple.last_price ?? null,
+    });
+  } else if (price !== null) {
+    row.price = price;
+  }
+}
+
+// Every added item is a staple.
+async function addGroceryItem(name, rawPrice) {
+  name = name.trim();
+  if (!name || state.stapleSaving) return null;
+  state.stapleSaving = true;
+  state.itemDraft = { name, price: rawPrice };
+  render(); // the Add button greys out while a new staple saves
+  try {
+    await tickByName(name, parseMoney(rawPrice) ?? null);
+  } catch (err) {
+    if (lockOnUnknownWrite(err)) return null;
+    noticeSheet({
+      title: "Couldn't add it",
+      body: `${name} wasn't saved: ${err.message ?? 'no connection'}`,
+    });
+    return null;
+  } finally {
+    state.stapleSaving = false;
+  }
+  state.itemDraft = null;
+  scheduleSave();
+  render();
+  $('#form-additem input[name="name"]')?.focus();
+  return true;
+}
+
+// A row with no live staple (an old one-off, or removed on the other phone) is
+// invisible on Budget yet still counted, so it becomes a staple again.
+async function promoteOneOffs() {
+  const live = new Set(state.staples.map((s) => s.id));
+  const orphans = state.week.groceries.filter((g) => !live.has(g.stapleId));
+  if (orphans.length === 0) return;
+  state.week.groceries = state.week.groceries.filter((g) => live.has(g.stapleId));
+  for (const g of orphans) await tickByName(g.name, g.price ?? null);
+  scheduleSave();
 }
 
 // Volatile flag: a failed card photo degrades to the tinted tile. Cleared
@@ -1494,7 +1616,6 @@ function viewWeek() {
 
 function viewBudget() {
   const w = state.week;
-  const manual = w.groceries.filter((g) => !g.stapleId);
   return `
     <div class="screen">
       <h2 class="screen-title">Budget</h2>
@@ -1508,10 +1629,11 @@ function viewBudget() {
       </div>
 
       <p class="list-title">Staples</p>
+      <p class="list-hint">Hold a staple to remove it.</p>
       ${state.staples.map((s) => {
         const row = w.groceries.find((g) => g.stapleId === s.id);
         return `
-          <div class="g-row">
+          <div class="g-row" data-staple="${s.id}">
             <label class="tick">
               <input type="checkbox" data-change="staple" data-id="${s.id}" ${row ? 'checked' : ''}>
               <span class="box">✓</span>
@@ -1523,18 +1645,10 @@ function viewBudget() {
           </div>`;
       }).join('')}
 
-      <p class="list-title">Off the list</p>
-      ${manual.map((g) => `
-        <div class="g-row">
-          <button type="button" class="g-remove" data-action="remove-item" data-row="${g.id}" aria-label="Remove ${esc(g.name)}">×</button>
-          <span class="g-name">${esc(g.name)}</span>
-          <input class="g-price" type="number" inputmode="decimal" min="0" step="any" placeholder="—"
-                 value="${g.price ?? ''}" data-input="price" data-row="${g.id}">
-        </div>`).join('')}
       <form id="form-additem" class="add-item">
-        <input type="text" name="name" placeholder="Add an item" maxlength="80" autocomplete="off">
-        <input type="number" name="price" inputmode="decimal" min="0" step="any" placeholder="KSh">
-        <button type="submit">Add</button>
+        <input type="text" name="name" placeholder="Add an item" maxlength="80" autocomplete="off" value="${esc(state.itemDraft?.name)}">
+        <input type="number" name="price" inputmode="decimal" min="0" step="any" placeholder="KSh" value="${esc(state.itemDraft?.price)}">
+        <button type="submit"${state.stapleSaving ? ' disabled' : ''}>Add</button>
       </form>
 
       ${viewTotals()}
@@ -1737,23 +1851,6 @@ let mealWriteInFlight = false;
 // the week delete has the same one-at-a-time shape, on its own gate
 let weekDeleteInFlight = false;
 
-// A timed-out write is abandoned, not cancelled — it may still land. Freeing
-// the sheet would let a second write race it, so the app locks into a resync,
-// which is the only thing that can tell what the server actually holds.
-function lockOnUnknownWrite(err) {
-  if (!err?.timedOut) return false;
-  settleConfirm(false); // the error screen replaces any open question — answer it, don't strand its flow
-  state.editId = null;
-  state.editName = '';
-  state.addOpen = false;
-  state.addName = '';
-  state.phase = 'error';
-  state.errorTitle = "Can't confirm";
-  state.errorMsg = "Couldn't tell whether that change landed — it took too long to answer. Tap Try again to read the truth from Supabase.";
-  render();
-  return true;
-}
-
 const actions = {
   'pick-tab': (el) => {
     state.pickTab = el.dataset.tab;
@@ -1827,12 +1924,6 @@ const actions = {
       state.lifted = null;
       scheduleSave();
     }
-    render();
-  },
-
-  'remove-item': (el) => {
-    state.week.groceries = state.week.groceries.filter((g) => g.id !== el.dataset.row);
-    scheduleSave();
     render();
   },
 
@@ -2008,7 +2099,7 @@ document.addEventListener('keydown', (e) => {
 // error events don't bubble — capture phase is the only delegated way in
 document.addEventListener('error', (e) => { markDeadImage(e.target); }, true);
 
-/* ---------- long-press opens the meal editor ---------- */
+/* ---------- long-press opens the meal editor, or a staple's removal ---------- */
 const LONG_PRESS_MS = 500;
 let press = null;          // { x, y, timer } while a hold is possible
 let pressConsumed = false; // the hold fired — the trailing click is the same gesture
@@ -2024,6 +2115,15 @@ function openEditSheet(id) {
   $('#form-editmeal input[name="name"]')?.focus();
 }
 
+// the price box is for typing — holding a number box is how a phone pastes
+function holdOpener(target) {
+  const card = target.closest('.meal-card[data-id]');
+  if (card) return () => openEditSheet(card.dataset.id);
+  const row = target.closest('.g-row[data-staple]');
+  if (row && !target.closest('.g-price')) return () => removeStaple(row.dataset.staple);
+  return null;
+}
+
 function cancelPress() {
   if (!press) return;
   clearTimeout(press.timer);
@@ -2036,12 +2136,11 @@ document.addEventListener('pointerdown', (e) => {
   if (e.isPrimary) pressConsumed = false;
   cancelPress(); // any new touch kills a pending hold — two fingers is not a hold
   if (e.button !== 0) return; // right-button holds belong to contextmenu
-  const card = e.target.closest('.meal-card[data-id]');
-  if (!card || state.editId) return;
-  const id = card.dataset.id;
+  const open = holdOpener(e.target);
+  if (!open || state.editId) return;
   press = {
     x: e.clientX, y: e.clientY,
-    timer: setTimeout(() => { pressConsumed = true; openEditSheet(id); }, LONG_PRESS_MS),
+    timer: setTimeout(() => { pressConsumed = true; open(); }, LONG_PRESS_MS),
   };
 });
 document.addEventListener('pointermove', (e) => {
@@ -2054,10 +2153,10 @@ document.addEventListener('pointercancel', cancelPress);
 // Android long-press arrives as contextmenu and desktop right-click means the
 // same thing; opening is idempotent, so the timer double-firing is harmless
 document.addEventListener('contextmenu', (e) => {
-  const card = e.target.closest('.meal-card[data-id]');
-  if (!card) return;
+  const open = holdOpener(e.target);
+  if (!open) return;
   e.preventDefault();
-  openEditSheet(card.dataset.id);
+  open();
 });
 
 // capture phase: the click that ends a hold must die before the action
@@ -2206,18 +2305,7 @@ document.addEventListener('submit', async (e) => {
     render();
   }
 
-  if (form.id === 'form-additem') {
-    const name = form.name.value.trim();
-    if (!name) return;
-    const price = parseMoney(form.price.value);
-    state.week.groceries.push({
-      id: crypto.randomUUID(), stapleId: null, name,
-      price: price === undefined ? null : price,
-    });
-    scheduleSave();
-    render();
-    $('#form-additem input[name="name"]')?.focus();
-  }
+  if (form.id === 'form-additem') addGroceryItem(form.name.value, form.price.value);
 });
 
 /* ---------- routing lives in 3. UTILITIES; this is only the wiring ---------- */
@@ -2271,6 +2359,7 @@ async function initData() {
     state.history = null;  // a resync must re-read past weeks too
     state.historyError = ''; // and not leave a stale failure painted over them
     state.saveStatus = 'saved';
+    await promoteOneOffs();
     state.phase = 'ready';
     const { route, detail } = currentRoute();
     state.route = route;

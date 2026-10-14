@@ -22,7 +22,7 @@ The app keeps that exact rhythm. It removes the retyping, the jumping between no
 | Question | Decision |
 |---|---|
 | Images | You curate — pick a photo, resized in-browser, stored in Supabase Storage. App works fully with none. |
-| Groceries | Staples list you tick, plus free manual rows. No ingredient auto-suggestion. |
+| Groceries | Staples list you tick; anything you add becomes a staple (§12 item 11). No ingredient auto-suggestion. |
 | History | Read-only look-back at past weeks |
 | Data | **Supabase from day one.** Same weeks on every device. |
 | Sign-in | One shared household account, email + password, once per device |
@@ -120,7 +120,7 @@ Tap a dinner to lift it, tap another to trade — default lunches shift with the
 ### Budget
 Amount at top: *"To spend this week."*
 
-Then your staples — fruits included, a row like any other — each a tick and a price you type for the week (quantities change weekly, so prices are entered fresh rather than remembered; §12 item 8). Below, **Add an item** for anything off-list. Amounts are typed, never nudged: number inputs carry no spinner arrows.
+Then your staples — fruits included, a row like any other — each a tick and a price you type for the week (quantities change weekly, so prices are entered fresh rather than remembered; §12 item 8). Below, **Add an item** saves a new staple and ticks it for the week (§12 item 11); hold a staple to remove it. Amounts are typed, never nudged: number inputs carry no spinner arrows.
 
 Sticky footer, always visible: total, then remaining in large mono numerals. Green while there's room, amber inside the last 10%, red and negative past zero.
 
@@ -217,3 +217,4 @@ The sequence matters — auth emails (password resets) need to know your live UR
 8. Staple price memory (2026-08-06) — **dropped, not deferred**. Quantities bought change week to week, so remembered prices would mislead more than help; prices are typed fresh each week. Ticking a staple still prefills its seed default as a starting hint.
 9. History (2026-08-06) — **fifth tab**, resolving where the History screen lives. The active week is the newest `weeks` row: a draft is resumed no matter how stale (saving is the household's ritual, not the calendar's), and saving starts the next draft per the Summary section.
 10. Library editing (2026-08-07) — **hold a meal card** to rename it, replace its photo, or archive it. Weeks reference meals by id, so a rename ripples into past menus (they are lookups, not snapshots) and archived meals stay loaded so history keeps their names — they only leave the picking grid. A meal on the current menu refuses to archive until unpicked. Replaced photos are never deleted from Storage: seed meals share objects (one vegetables photo serves two breakfasts), so a replaced URL is not an orphaned one. A saved week can be deleted from its History record — the one destructive act in the app, behind a confirm.
+11. Every added item is a staple (2026-10-14) — **no one-offs**. The household buys the same things week to week, so *Add an item* saves the name as a new staple (at the bottom, no starting price) and ticks it at the typed price; the *Off the list* section is gone. A name already on the list, in any case, ticks that staple instead, and a typed price replaces the week's. **Hold a staple** to remove it, behind a confirm (the second destructive act after deleting a week): it is deleted outright, no archive, and comes off this week's list; saved weeks keep their own copy of each name and price. On load, any draft row with no live staple behind it — an old one-off, or a staple removed on the other phone while this week had it ticked — becomes a staple by the same rules, so nothing is counted that the Budget tab cannot show. Staples have no rename: remove and add again.

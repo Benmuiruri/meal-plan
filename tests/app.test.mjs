@@ -38,12 +38,12 @@ function viewSaveErrorBanner() { const k = state.saveErrorPermanent ? 'permanent
 export { state, db, scheduleSave, flushSave, signIn, resizeImage, isServerRejection,
          markDeadImage, reviveDeadImages, performSaveWeek, withCeiling, MEAL_REQUEST_CEILING_MS,
          confirmSheet, settleConfirm, noticeSheet, togglePasswordField, isPasswordToggle,
-         clearPicks, changeWeekStart, renderLog };`;
+         clearPicks, changeWeekStart, removeStaple, addGroceryItem, promoteOneOffs, renderLog };`;
 
 const { state, db, scheduleSave, flushSave, signIn, resizeImage, isServerRejection,
         markDeadImage, reviveDeadImages, performSaveWeek, withCeiling, MEAL_REQUEST_CEILING_MS,
         confirmSheet, settleConfirm, noticeSheet, togglePasswordField, isPasswordToggle,
-        clearPicks, changeWeekStart, renderLog } =
+        clearPicks, changeWeekStart, removeStaple, addGroceryItem, promoteOneOffs, renderLog } =
   await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(src));
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -1940,7 +1940,7 @@ const renderMod = await import('data:text/javascript;charset=utf-8,' + encodeURI
   const state = { phase: 'ready', route: 'pick', pickTab: 'mains', saveStatus: 'saved',
     saveErrorPermanent: false, errorMsg: '', loadingMsg: '', signinEmail: '',
     addOpen: false, addName: '', editId: null, editName: '', lifted: null, staples: [],
-    history: null, historyError: '', historyDetail: null,
+    history: null, historyError: '', historyDetail: null, itemDraft: null, stapleSaving: false,
     meals: [{ id: 'm1', kind: 'main', name: 'Steak', tint: '#123' }],
     week: { id: 'w1', week_start: '2026-08-03', budget: null,
             picks: { mains: [], breakfasts: [] }, days: {}, groceries: [] } };
@@ -2297,4 +2297,356 @@ test('the committed icons are pixel-identical to what tools/make-icons.mjs draws
     assert.ok(rawPixels(disk).equals(rawPixels(renderIcon(size))),
       `icon-${size}.png is exactly what its committed source draws`);
   }
+});
+
+// ── every added grocery item is a staple ───────────────────────────────
+
+function fakeStaplesTable({ failWith = null } = {}) {
+  const inserts = [];
+  return {
+    inserts,
+    from(name) {
+      const b = {
+        insert(payload) { inserts.push({ table: name, payload }); return b; },
+        select: () => b,
+        single: () => b,
+        async then(resolve) {
+          resolve(failWith
+            ? { data: null, error: failWith }
+            : { data: { id: 's9', last_price: null, ...inserts.at(-1).payload }, error: null });
+        },
+      };
+      return b;
+    },
+  };
+}
+
+test('addStaple inserts the name at the given place with no starting price, and returns the row', async () => {
+  db.client = fakeStaplesTable();
+  const row = await db.addStaple('u1', { name: 'Milk', sort_order: 10 });
+  assert.deepEqual(db.client.inserts,
+    [{ table: 'staples', payload: { user_id: 'u1', name: 'Milk', sort_order: 10 } }],
+    'the typed price is this week’s, never the staple’s starting price');
+  assert.equal(row.id, 's9');
+});
+
+test('addStaple surfaces server rejections', async () => {
+  db.client = fakeStaplesTable({ failWith: { code: '42501', message: 'RLS says no' } });
+  await assert.rejects(db.addStaple('u1', { name: 'Milk', sort_order: 10 }), (err) => err.code === '42501');
+});
+
+test('deleteStaple deletes exactly the named staple and tolerates one already gone', async () => {
+  db.client = fakeDeleteTable();
+  await db.deleteStaple('s3');
+  assert.equal(db.client.deletes[0].table, 'staples');
+  assert.deepEqual(db.client.deletes[0].filters, [['id', 's3']]);
+  await db.deleteStaple('s3'); // the skew retry's re-run finds nothing — success, not a throw
+  assert.equal(db.client.deletes.length, 2);
+});
+
+test('deleteStaple surfaces server rejections', async () => {
+  db.client = fakeDeleteTable({ failWith: { code: '42501', message: 'RLS says no' } });
+  await assert.rejects(db.deleteStaple('s3'), (err) => err.code === '42501');
+});
+
+test('removeStaple asks first, and no answer deletes nothing', async () => {
+  state.staples = [{ id: 's1', name: 'Eggs' }, { id: 's2', name: 'Milk' }];
+  db.client = fakeDeleteTable();
+  const p = removeStaple('s1');
+  assert.match(state.confirm.title, /^Remove Eggs from your staples\?$/);
+  settleConfirm(false);
+  assert.equal(await p, false);
+  assert.equal(db.client.deletes.length, 0);
+  assert.equal(state.staples.length, 2);
+  assert.equal(state.week.groceries.length, 1);
+  assert.equal(state.saveStatus, 'saved');
+});
+
+test('removeStaple deletes the staple and takes it off this week’s list', async () => {
+  state.staples = [{ id: 's1', name: 'Eggs' }, { id: 's2', name: 'Milk' }];
+  state.week.groceries.push({ id: 'g2', stapleId: 's2', name: 'Milk', price: 50 });
+  db.client = fakeDeleteTable();
+  const p = removeStaple('s1');
+  settleConfirm(true);
+  assert.equal(await p, true);
+  assert.deepEqual(db.client.deletes[0].filters, [['id', 's1']]);
+  assert.deepEqual(state.staples.map((s) => s.id), ['s2']);
+  assert.deepEqual(state.week.groceries.map((g) => g.id), ['g2'],
+    'a removed staple must not keep counting in the week’s total');
+  assert.equal(state.saveStatus, 'saving', 'the shorter list is on its way to the server');
+  db.client = fakeWeeksClient();
+  await flushSave(); // disarm the debounce this test armed
+});
+
+test('a rejected removeStaple changes nothing and says why', async () => {
+  state.staples = [{ id: 's1', name: 'Eggs' }];
+  db.client = fakeDeleteTable({ failWith: { code: '42501', message: 'RLS says no' } });
+  const p = removeStaple('s1');
+  settleConfirm(true);
+  assert.equal(await p, null);
+  assert.equal(state.staples.length, 1);
+  assert.equal(state.week.groceries.length, 1);
+  assert.ok(state.confirm?.notice, 'the failure is surfaced, not swallowed');
+  assert.match(state.confirm.body, /RLS says no/);
+  settleConfirm(true);
+  assert.equal(state.saveStatus, 'saved');
+});
+
+test('a timed-out removeStaple locks the app into a resync', async () => {
+  state.staples = [{ id: 's1', name: 'Eggs' }];
+  const late = Object.assign(new Error('took too long'), { timedOut: true });
+  db.client = { from: () => ({ delete() { return this; }, eq: () => Promise.reject(late) }) };
+  const p = removeStaple('s1');
+  settleConfirm(true);
+  assert.equal(await p, null);
+  assert.equal(state.phase, 'error', 'the delete may still land — only a resync knows');
+  assert.equal(state.staples.length, 1, 'an unknown outcome claims nothing');
+});
+
+test('a hold opens the editor on a meal card and the removal question on a staple row — not from its price box', async () => {
+  const s = html.indexOf('function holdOpener');
+  assert.ok(s > 0, 'holdOpener found in index.html');
+  const fn = html.slice(s, html.indexOf('\n}\n', s) + 2);
+  const mod = await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(`
+    const calls = [];
+    const openEditSheet = (id) => calls.push(['edit', id]);
+    const removeStaple = (id) => calls.push(['remove', id]);
+    ${fn}
+    export { holdOpener, calls };`));
+  // a pointer target: closest() answers for the selectors it sits inside
+  const under = (hits) => ({ closest: (sel) => hits[sel] ?? null });
+  const card = { dataset: { id: 'm1' } };
+  const row = { dataset: { staple: 's1' } };
+
+  mod.holdOpener(under({ '.meal-card[data-id]': card }))();
+  mod.holdOpener(under({ '.g-row[data-staple]': row }))();
+  assert.deepEqual(mod.calls, [['edit', 'm1'], ['remove', 's1']]);
+  assert.equal(mod.holdOpener(under({ '.g-row[data-staple]': row, '.g-price': {} })), null,
+    'holding a number box is how a phone pastes — it must not ask to remove the staple');
+  assert.equal(mod.holdOpener(under({})), null, 'anywhere else, a hold is nothing');
+
+  const w = html.slice(html.indexOf('const LONG_PRESS_MS'), html.indexOf("document.addEventListener('input'"));
+  assert.match(w, /addEventListener\('pointerdown'[\s\S]*?holdOpener\(e\.target\)/, 'the timer arms from the same lookup');
+  assert.match(w, /addEventListener\('contextmenu'[\s\S]*?holdOpener\(e\.target\)/, 'and so does Android’s long-press');
+});
+
+test('addGroceryItem saves a new name as the last staple and ticks it at the typed price', async () => {
+  state.session = { user: { id: 'u1' } };
+  state.staples = [{ id: 's1', name: 'Eggs', sort_order: 0 }, { id: 's2', name: 'Bread', sort_order: 4 }];
+  state.week.groceries = [];
+  db.client = fakeStaplesTable();
+  assert.equal(await addGroceryItem('  Milk ', '150'), true);
+  assert.deepEqual(db.client.inserts[0].payload, { user_id: 'u1', name: 'Milk', sort_order: 5 },
+    'it lands after the last staple, whatever the gaps');
+  assert.deepEqual(state.staples.map((s) => s.id), ['s1', 's2', 's9']);
+  assert.equal(state.week.groceries.length, 1);
+  assert.deepEqual({ ...state.week.groceries[0], id: undefined },
+    { id: undefined, stapleId: 's9', name: 'Milk', price: 150 });
+  assert.equal(state.itemDraft, null, 'a saved item empties the add box');
+  assert.equal(state.saveStatus, 'saving');
+  db.client = fakeWeeksClient();
+  await flushSave();
+});
+
+test('addGroceryItem with no price ticks the new staple with no price', async () => {
+  state.session = { user: { id: 'u1' } };
+  state.staples = [];
+  state.week.groceries = [];
+  db.client = fakeStaplesTable();
+  await addGroceryItem('Milk', '');
+  assert.equal(db.client.inserts[0].payload.sort_order, 0, 'the first staple of an empty list');
+  assert.equal(state.week.groceries[0].price, null);
+  db.client = fakeWeeksClient();
+  await flushSave();
+});
+
+test('addGroceryItem ticks a staple that already has the name instead of adding a copy', async () => {
+  state.staples = [{ id: 's1', name: 'Eggs', last_price: 100 }];
+  state.week.groceries = [];
+  db.client = fakeStaplesTable();
+  assert.equal(await addGroceryItem('  eGGs ', ''), true);
+  assert.equal(db.client.inserts.length, 0, 'no duplicate staple');
+  assert.deepEqual({ ...state.week.groceries[0], id: undefined },
+    { id: undefined, stapleId: 's1', name: 'Eggs', price: 100 },
+    'with no typed price it ticks the way the tick box does, starting price and all');
+  state.week.groceries = [];
+  await addGroceryItem('eggs', '130');
+  assert.equal(state.week.groceries[0].price, 130, 'a typed price beats the starting price');
+  db.client = fakeWeeksClient();
+  await flushSave();
+});
+
+test('addGroceryItem on an already-ticked staple: a typed price replaces, an empty one leaves it', async () => {
+  state.staples = [{ id: 's1', name: 'Eggs', last_price: 100 }];
+  db.client = fakeStaplesTable();
+  await addGroceryItem('EGGS', '150');
+  assert.equal(state.week.groceries.length, 1, 'still one Eggs row');
+  assert.equal(state.week.groceries[0].price, 150);
+  await addGroceryItem('eggs', '');
+  assert.equal(state.week.groceries[0].price, 150, 'an empty price box wipes nothing');
+  db.client = fakeWeeksClient();
+  await flushSave();
+});
+
+test('a rejected addGroceryItem adds nothing, says why, and keeps what was typed', async () => {
+  state.session = { user: { id: 'u1' } };
+  state.staples = [];
+  state.week.groceries = [];
+  db.client = fakeStaplesTable({ failWith: { code: '42501', message: 'RLS says no' } });
+  assert.equal(await addGroceryItem('Milk', '150'), null);
+  assert.equal(state.staples.length, 0);
+  assert.equal(state.week.groceries.length, 0);
+  assert.match(state.confirm?.body ?? '', /RLS says no/, 'the failure is surfaced, not swallowed');
+  assert.deepEqual(state.itemDraft, { name: 'Milk', price: '150' }, 'retyping is not the price of a bad connection');
+  settleConfirm(true);
+  assert.equal(state.saveStatus, 'saved');
+});
+
+test('a timed-out addGroceryItem locks the app into a resync', async () => {
+  state.session = { user: { id: 'u1' } };
+  state.staples = [];
+  const late = Object.assign(new Error('took too long'), { timedOut: true });
+  db.client = { from: () => ({ insert() { return this; }, select() { return this; }, single: () => Promise.reject(late) }) };
+  assert.equal(await addGroceryItem('Milk', '150'), null);
+  assert.equal(state.phase, 'error', 'the insert may still land — only a resync knows');
+});
+
+test('addGroceryItem is one write at a time, and a blank name is nothing', async () => {
+  state.session = { user: { id: 'u1' } };
+  state.staples = [];
+  state.week.groceries = [];
+  db.client = fakeStaplesTable();
+  const first = addGroceryItem('Milk', '');
+  assert.equal(await addGroceryItem('Milk', ''), null, 'a double-tap must not insert twice');
+  await first;
+  assert.equal(db.client.inserts.length, 1);
+  assert.equal(await addGroceryItem('   ', '5'), null);
+  assert.equal(state.week.groceries.length, 1);
+  db.client = fakeWeeksClient();
+  await flushSave();
+});
+
+test('the Add button hands its typed name and price to addGroceryItem and nothing else', () => {
+  const at = html.indexOf("if (form.id === 'form-additem')");
+  assert.ok(at > 0, 'form-additem handler found in index.html');
+  const live = html.slice(at, html.indexOf('\n});', at));
+  assert.match(live, /^if \(form\.id === 'form-additem'\) addGroceryItem\(form\.name\.value, form\.price\.value\);\s*$/,
+    'one path for every add — a second push here would skip the staple');
+});
+
+// ── on load, a week row with no live staple behind it becomes one ─────
+const rowsOf = (week) => week.groceries.map(({ stapleId, name, price }) => ({ stapleId, name, price }));
+
+test('promoteOneOffs turns a one-off into a staple, ticked at its own price', async () => {
+  state.session = { user: { id: 'u1' } };
+  state.staples = [{ id: 's1', name: 'Eggs', sort_order: 0 }];
+  state.week.groceries.push({ id: 'g2', stapleId: null, name: 'Cake', price: 900 });
+  db.client = fakeStaplesTable();
+  await promoteOneOffs();
+  assert.deepEqual(db.client.inserts[0].payload, { user_id: 'u1', name: 'Cake', sort_order: 1 });
+  assert.deepEqual(rowsOf(state.week), [
+    { stapleId: 's1', name: 'Eggs', price: 100 },
+    { stapleId: 's9', name: 'Cake', price: 900 },
+  ]);
+  assert.equal(state.saveStatus, 'saving', 'the linked rows are on their way to the server');
+  db.client = fakeWeeksClient();
+  await flushSave();
+});
+
+test('promoteOneOffs links a one-off to the staple that has its name, and its price wins', async () => {
+  state.session = { user: { id: 'u1' } };
+  state.staples = [{ id: 's1', name: 'Eggs', last_price: 80 }, { id: 's2', name: 'Milk', last_price: 60 }];
+  state.week.groceries.push(
+    { id: 'g2', stapleId: null, name: 'eggs ', price: 130 },  // Eggs is ticked at 100
+    { id: 'g3', stapleId: null, name: 'MILK', price: 70 },    // Milk is not ticked
+  );
+  db.client = fakeStaplesTable();
+  await promoteOneOffs();
+  assert.equal(db.client.inserts.length, 0, 'no duplicate staples');
+  assert.deepEqual(rowsOf(state.week), [
+    { stapleId: 's1', name: 'Eggs', price: 130 },
+    { stapleId: 's2', name: 'Milk', price: 70 },
+  ]);
+  db.client = fakeWeeksClient();
+  await flushSave();
+});
+
+test('promoteOneOffs brings back a staple removed elsewhere while this week still had it ticked', async () => {
+  state.session = { user: { id: 'u1' } };
+  state.staples = [];                               // s1 was removed on the other phone
+  db.client = fakeStaplesTable();
+  await promoteOneOffs();
+  assert.deepEqual(rowsOf(state.week), [{ stapleId: 's9', name: 'Eggs', price: 100 }],
+    'a row nobody can see on the Budget tab must not keep counting in the total');
+  db.client = fakeWeeksClient();
+  await flushSave();
+});
+
+test('promoteOneOffs with every row linked writes nothing', async () => {
+  state.staples = [{ id: 's1', name: 'Eggs' }];
+  db.client = fakeStaplesTable();
+  await promoteOneOffs();
+  assert.equal(db.client.inserts.length, 0);
+  assert.equal(state.saveStatus, 'saved', 'no save armed on an ordinary load');
+});
+
+test('a failed promoteOneOffs throws, so loading stops on the error screen', async () => {
+  state.session = { user: { id: 'u1' } };
+  state.staples = [];
+  db.client = fakeStaplesTable({ failWith: { code: '42501', message: 'RLS says no' } });
+  await assert.rejects(promoteOneOffs(), (err) => err.code === '42501');
+  assert.equal(state.saveStatus, 'saved', 'a half-done conversion is never saved');
+});
+
+test('loading runs the conversion after the week is in place and before the app opens', () => {
+  const s = html.indexOf('async function initData');
+  assert.ok(s > 0, 'initData found in index.html');
+  const live = html.slice(s, html.indexOf('\n}\n', s));
+  const tryBody = live.slice(live.indexOf('try {'), live.indexOf('} catch (err) {'));
+  assert.match(tryBody, /state\.week = week;[\s\S]*state\.saveStatus = 'saved';[\s\S]*await promoteOneOffs\(\);[\s\S]*state\.phase = 'ready';/,
+    'inside the try, so a failure lands on Can’t load — and after the status reset, so a scheduled save is not reported as Saved');
+});
+
+// ── the Budget tab ─────────────────────────────────────────────────────
+function budgetHtml({ staples, groceries, itemDraft = null, stapleSaving = false }) {
+  const s = renderMod.rstate;
+  Object.assign(s, { route: 'budget', staples, itemDraft, stapleSaving });
+  s.week.groceries = groceries;
+  try {
+    return renderToHtml();
+  } finally {
+    Object.assign(s, { route: 'pick', staples: [], itemDraft: null, stapleSaving: false });
+    s.week.groceries = [];
+  }
+}
+
+test('the Budget tab lists every staple as a holdable row, with a hint saying so', () => {
+  const out = budgetHtml({
+    staples: [{ id: 's1', name: 'Eggs' }, { id: 's2', name: '<b>Tea & milk</b>' }],
+    groceries: [{ id: 'g1', stapleId: 's1', name: 'Eggs', price: 100 }],
+  });
+  assert.match(out, /Hold a staple to remove it\./);
+  assert.match(out, /<div class="g-row" data-staple="s1">[\s\S]*?Eggs/, 'the hold finds its staple through this attribute');
+  assert.match(out, /data-staple="s2">[\s\S]*?&lt;b&gt;Tea &amp; milk&lt;\/b&gt;/, 'names land escaped');
+  assert.match(out, /data-change="staple" data-id="s1" checked/);
+  assert.doesNotMatch(out, /Off the list/, 'every added item is a staple — there is no one-off section');
+  assert.doesNotMatch(out, /remove-item/);
+});
+
+test('the add box re-emits a kept draft, escaped, and greys out while a staple saves', () => {
+  const idle = budgetHtml({ staples: [], groceries: [] });
+  assert.match(idle, /name="name"[^>]*value=""/);
+  assert.match(idle, /<button type="submit">Add<\/button>/);
+  const out = budgetHtml({
+    staples: [], groceries: [], stapleSaving: true, itemDraft: { name: 'Tea "loose"', price: '150' },
+  });
+  assert.match(out, /name="name"[^>]*value="Tea &quot;loose&quot;"/, 'a failed save keeps the typed name');
+  assert.match(out, /name="price"[^>]*value="150"/, 'and the typed price');
+  assert.match(out, /<button type="submit" disabled>Add<\/button>/, 'no second tap while the first is saving');
+});
+
+test('holding a staple row neither selects its text nor opens the iOS callout', () => {
+  const style = html.slice(html.indexOf('<style>'), html.indexOf('</style>'));
+  assert.match(style, /\.g-row\[data-staple\]\s*\{[^}]*-webkit-touch-callout:\s*none[^}]*user-select:\s*none/,
+    'otherwise iOS claims the long-press before our timer fires');
 });
